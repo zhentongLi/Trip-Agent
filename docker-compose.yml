@@ -1,0 +1,59 @@
+# ===== docker-compose.yml =====
+# 一键启动：后端(FastAPI) + 前端(Vue3/Nginx)
+# 使用方法：
+#   cp backend/.env.example backend/.env  # 填入 API Key
+#   docker-compose up --build
+
+version: '3.9'
+
+services:
+
+  # ---------- 后端服务 ----------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: trip-planner-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      # 覆盖 CORS，允许前端容器访问
+      - CORS_ORIGINS=http://localhost,http://localhost:80,http://frontend
+    ports:
+      - "8000:8000"
+    volumes:
+      # 挂载日志目录到宿主机（方便查看实时日志）
+      - ./backend/logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s # Conda 环境首次启动慢，给足时间
+    networks:
+      - trip-network
+
+  # ---------- 前端服务 ----------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # 填入你的高德地图 JS API Key（用于地图渲染）
+        - VITE_AMAP_WEB_JS_KEY=${VITE_AMAP_WEB_JS_KEY:-}
+        # 前端内部代理到 backend 容器，生产部署时这里用实际域名
+        - VITE_API_BASE_URL=http://backend:8000
+    container_name: trip-planner-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - trip-network
+
+networks:
+  trip-network:
+    driver: bridge

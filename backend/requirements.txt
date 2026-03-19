@@ -1,0 +1,41 @@
+# LangGraph / LangChain（替代 HelloAgents 框架）
+langchain-openai>=1.0.0
+langchain-core>=1.0.0
+langgraph>=1.0.0
+
+# FastAPI和相关依赖
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# HTTP客户端
+httpx>=0.27.0
+aiohttp>=3.10.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# CORS支持
+python-multipart>=0.0.9
+
+# 日志
+loguru>=0.7.0
+
+# MCP相关（保留用于其他模块，Agent 工具已改用 REST API）
+fastmcp>=2.0.0
+
+# PDF 导出（功能22）
+reportlab>=4.0.0
+
+# 用户账号系统（功能18/23）
+sqlmodel>=0.0.22
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# 导游RAG（功能27）
+openai>=1.0.0
+
+# 其他工具
+python-dateutil>=2.8.2
+huggingface_hub>=0.25.0
