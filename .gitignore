@@ -42,3 +42,9 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Private project notes (keep local only)
+个人与Agent对话历史.md
+项目简历与面试准备.ipynb
+业务技术升级事项.ipynb
+Extra01-面试问题总结.md
