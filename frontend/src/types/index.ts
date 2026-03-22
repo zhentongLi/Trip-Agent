@@ -177,16 +177,41 @@ export interface GuideReference {
 
 export interface GuideAskRequest {
   question: string
+  session_id?: string
+  debug?: boolean
   city?: string
   attraction_name?: string
   trip_plan?: TripPlan
   top_k?: number
 }
 
+export interface GuideDebugSkillMeta {
+  skill_name?: string
+  skill_description?: string
+  session_id?: string
+  debug?: boolean
+}
+
+export interface GuideDebugRetrievalMeta {
+  rewritten_queries?: string[]
+  iterative_rounds?: number
+  source_counts?: Record<string, number>
+  has_local_kb_hit?: boolean
+  vector_store_enabled?: boolean
+  embedding_strategy?: string
+  reranker_mode?: string
+}
+
+export interface GuideDebugMeta {
+  skill_meta?: GuideDebugSkillMeta
+  retrieval_meta?: GuideDebugRetrievalMeta
+}
+
 export interface GuideAskResponse {
   success: boolean
   answer: string
   references: GuideReference[]
+  debug_meta?: GuideDebugMeta | null
   message: string
 }
 

@@ -50,3 +50,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Chroma vector store runtime files
+data/chroma_guide/
+
+# Runtime user memory data
+data/user_profiles.json
+

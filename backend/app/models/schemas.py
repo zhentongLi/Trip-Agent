@@ -1,6 +1,6 @@
 """数据模型定义"""
 
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 from datetime import date
 
@@ -175,15 +175,17 @@ class TripPlanResponse(BaseModel):
 
 
 class TripAdjustRequest(BaseModel):
-    """AI 行程调整请求（功能20：AI 行程调整对话）"""
+    """AI 行程调整请求（AI 行程调整对话）"""
     trip_plan: TripPlan = Field(..., description="当前行程计划")
     user_message: str = Field(..., description="用户调整要求", example="把第二天的故宫换成颐和园")
     city: str = Field(default="", description="主城市（用于坐标修正）")
 
 
 class GuideAskRequest(BaseModel):
-    """导游 RAG 问答请求（功能27）"""
+    """导游 RAG 问答请求"""
     question: str = Field(..., description="用户问题", min_length=2, max_length=500)
+    session_id: str = Field(default="default", description="会话ID（用于记忆管理）")
+    debug: bool = Field(default=False, description="是否返回调试信息（Skill与检索命中详情）")
     city: str = Field(default="", description="城市上下文（可选）")
     attraction_name: Optional[str] = Field(default=None, description="景点名称上下文（可选）")
     trip_plan: Optional[TripPlan] = Field(default=None, description="当前行程（可选，用于个性化检索）")
@@ -205,11 +207,12 @@ class GuideAskResponse(BaseModel):
     success: bool = Field(default=True, description="是否成功")
     answer: str = Field(default="", description="导游回答")
     references: List[GuideReference] = Field(default=[], description="命中参考资料")
+    debug_meta: Optional[Dict[str, Any]] = Field(default=None, description="调试元信息（仅debug=true时返回）")
     message: str = Field(default="", description="响应消息")
 
 
 class ShareCreateRequest(BaseModel):
-    """行程分享创建请求（功能21：行程分享）"""
+    """行程分享创建请求（行程分享）"""
     plan: TripPlan = Field(..., description="要分享的行程")
     title: Optional[str] = Field(default=None, description="分享标题（可选）")
 

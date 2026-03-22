@@ -420,6 +420,13 @@
       :width="460"
     >
       <div class="adjust-drawer-content">
+        <div v-if="isDevEnv" class="guide-debug-toggle">
+          <a-space size="small" wrap>
+            <a-switch v-model:checked="guideDebugEnabled" size="small" />
+            <span class="guide-debug-toggle-text">调试模式（显示 Skill/RAG 命中详情）</span>
+            <a-tag color="processing">会话: {{ shortGuideSessionId(guideSessionId) }}</a-tag>
+          </a-space>
+        </div>
         <div class="guide-context" v-if="guideAttractionName">
           当前景点上下文：<a-tag color="blue">{{ guideAttractionName }}</a-tag>
         </div>
@@ -459,6 +466,58 @@
                   {{ reference.title }}
                 </a-tag>
               </a-space>
+            </div>
+
+            <div v-if="isDevEnv && msg.debugMeta" class="guide-debug-panel">
+              <div class="guide-debug-title">🧪 调试面板</div>
+              <a-space wrap size="small" class="guide-debug-tags">
+                <a-tag color="purple">
+                  Skill: {{ msg.debugMeta.skill_meta?.skill_name || '-' }}
+                </a-tag>
+                <a-tag :color="msg.debugMeta.retrieval_meta?.has_local_kb_hit ? 'success' : 'error'">
+                  本地知识库命中: {{ msg.debugMeta.retrieval_meta?.has_local_kb_hit ? '是' : '否' }}
+                </a-tag>
+                <a-tag :color="msg.debugMeta.retrieval_meta?.vector_store_enabled ? 'blue' : 'default'">
+                  向量库: {{ msg.debugMeta.retrieval_meta?.vector_store_enabled ? '启用' : '关闭' }}
+                </a-tag>
+                <a-tag color="geekblue">
+                  重排: {{ msg.debugMeta.retrieval_meta?.reranker_mode || '-' }}
+                </a-tag>
+                <a-tag color="cyan">
+                  迭代轮次: {{ msg.debugMeta.retrieval_meta?.iterative_rounds ?? 0 }}
+                </a-tag>
+              </a-space>
+
+              <div
+                v-if="sourceCountEntries(msg.debugMeta.retrieval_meta?.source_counts).length > 0"
+                class="guide-debug-block"
+              >
+                <div class="guide-debug-label">来源统计</div>
+                <a-space wrap size="small">
+                  <a-tag
+                    v-for="([source, count], sIdx) in sourceCountEntries(msg.debugMeta.retrieval_meta?.source_counts)"
+                    :key="`source-${idx}-${sIdx}`"
+                    color="blue"
+                  >
+                    {{ formatSourceLabel(source) }}: {{ count }}
+                  </a-tag>
+                </a-space>
+              </div>
+
+              <div
+                v-if="msg.debugMeta.retrieval_meta?.rewritten_queries && msg.debugMeta.retrieval_meta.rewritten_queries.length > 0"
+                class="guide-debug-block"
+              >
+                <div class="guide-debug-label">改写查询</div>
+                <ol class="guide-debug-query-list">
+                  <li
+                    v-for="(query, qIdx) in msg.debugMeta.retrieval_meta?.rewritten_queries"
+                    :key="`query-${idx}-${qIdx}`"
+                  >
+                    {{ query }}
+                  </li>
+                </ol>
+              </div>
             </div>
           </div>
 
@@ -505,7 +564,7 @@ import { message } from 'ant-design-vue'
 import { DownOutlined } from '@ant-design/icons-vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
-import type { TripPlan, AdjustChatEntry, GuideReference } from '@/types'
+import type { TripPlan, AdjustChatEntry, GuideReference, GuideDebugMeta } from '@/types'
 import { createShare, getSharedTrip, saveHistory, adjustTripPlan, exportTripPdfBackend, saveUserTrip, askGuideQuestion } from '@/services/api'
 import { isLoggedIn, getToken } from '@/services/auth'
 
@@ -532,6 +591,7 @@ type GuideChatEntry = {
   content: string
   timestamp: string
   references?: GuideReference[]
+  debugMeta?: GuideDebugMeta
 }
 const showGuideDrawer = ref(false)
 const guideInput = ref('')
@@ -539,6 +599,17 @@ const guiding = ref(false)
 const guideAttractionName = ref('')
 const guideMessages = ref<GuideChatEntry[]>([])
 const guideHistoryRef = ref<HTMLDivElement | null>(null)
+const isDevEnv = import.meta.env.DEV
+const guideDebugEnabled = ref(false)
+const GUIDE_SESSION_KEY = 'guide_session_id'
+const getOrCreateGuideSessionId = (): string => {
+  const existing = sessionStorage.getItem(GUIDE_SESSION_KEY)
+  if (existing) return existing
+  const sid = `guide-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  sessionStorage.setItem(GUIDE_SESSION_KEY, sid)
+  return sid
+}
+const guideSessionId = ref('')
 let map: any = null
 
 const loadPlanData = async () => {
@@ -585,6 +656,7 @@ const handleTripPlanUpdated = async () => {
 }
 
 onMounted(async () => {
+  guideSessionId.value = getOrCreateGuideSessionId()
   window.addEventListener('trip-plan-updated', handleTripPlanUpdated)
   await loadPlanData()
 })
@@ -656,6 +728,25 @@ const fillGuideExample = (text: string) => {
   guideInput.value = text
 }
 
+const shortGuideSessionId = (sid: string): string => {
+  if (!sid) return '-'
+  if (sid.length <= 16) return sid
+  return `${sid.slice(0, 8)}...${sid.slice(-4)}`
+}
+
+const sourceCountEntries = (counts?: Record<string, number>): Array<[string, number]> => {
+  if (!counts) return []
+  return Object.entries(counts)
+}
+
+const formatSourceLabel = (source: string): string => {
+  const map: Record<string, string> = {
+    knowledge_base: '本地知识库',
+    trip_plan: '当前行程',
+  }
+  return map[source] || source
+}
+
 const scrollGuideToBottom = async () => {
   await nextTick()
   if (guideHistoryRef.value) {
@@ -685,6 +776,8 @@ const handleGuideAsk = async () => {
   try {
     const result = await askGuideQuestion({
       question: q,
+      session_id: guideSessionId.value || getOrCreateGuideSessionId(),
+      debug: isDevEnv && guideDebugEnabled.value,
       city: tripPlan.value.city,
       attraction_name: guideAttractionName.value || undefined,
       trip_plan: tripPlan.value,
@@ -696,6 +789,7 @@ const handleGuideAsk = async () => {
       content: result.answer,
       timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
       references: result.references,
+      debugMeta: result.debug_meta || undefined,
     })
   } catch (e: any) {
     guideMessages.value.push({
@@ -1819,6 +1913,18 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   color: #666;
 }
 
+.guide-debug-toggle {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f3fbff;
+  border: 1px solid #d6f0ff;
+}
+
+.guide-debug-toggle-text {
+  font-size: 12px;
+  color: #3a4b57;
+}
+
 .guide-refs {
   margin-top: 8px;
   padding-top: 8px;
@@ -1829,6 +1935,43 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   font-size: 12px;
   color: #777;
   margin-bottom: 6px;
+}
+
+.guide-debug-panel {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #e8e8e8;
+  background: #fff;
+}
+
+.guide-debug-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #5f6b7a;
+  margin-bottom: 8px;
+}
+
+.guide-debug-tags {
+  margin-bottom: 8px;
+}
+
+.guide-debug-block {
+  margin-top: 6px;
+}
+
+.guide-debug-label {
+  font-size: 12px;
+  color: #78838f;
+  margin-bottom: 4px;
+}
+
+.guide-debug-query-list {
+  margin: 0;
+  padding-left: 18px;
+  color: #404a57;
+  font-size: 12px;
+  line-height: 1.5;
 }
 </style>
 

@@ -163,6 +163,34 @@ npm run dev
    - `GET /map/poi`、`GET /map/weather`、`POST /map/route`
    - `GET /poi/search`、`GET /poi/detail/{poi_id}`、`GET /poi/photo`
 
+## 今日更新（2026-03-22）
+
+### 技术升级
+
+- RAG 架构升级为向量检索：导游知识库已接入 Chroma 持久化向量库，支持远端 embedding（不可用时自动降级本地哈希向量）。
+- Advanced RAG Pipeline 落地：新增 Query Rewriting（Multi-Query / Step-Back / 可选 HyDE）、Re-ranking（Cross-Encoder 优先，失败回退轻量重排）、Iterative Retrieval（信息不足时自动二次检索）。
+- Runtime Skill 架构落地：新增 `RuntimeSkill`、`SkillRegistry`、`SkillRouter`，导游问答统一通过 `guide_qa` skill 分发执行。
+- Memory 模块升级为多实例友好：`MemoryService` 支持 Redis 共享存储（会话短期记忆 + 用户长期画像），无 Redis 时回退本地模式。
+- 可观测性增强：导游接口支持 `debug` 调试开关，返回 `skill_meta` 与 `retrieval_meta`（包含命中来源、改写查询、迭代轮次、本地知识库命中标记等）。
+- 自动化验证增强：新增 `backend/tests/validate_skill_flow.py`，支持 router / api / all 多模式验证。
+
+### 业务能力扩展
+
+- 导游问答从“单轮回答”升级为“可解释、可追踪”的检索问答：可直接看到命中来源与检索链路。
+- 增强个性化体验：导游回答可融合会话历史偏好（预算、风格、禁忌、历史目的地）进行上下文生成。
+- 支持生产部署场景：记忆层支持线上多实例共享，避免多副本下会话割裂。
+- 前端新增导游调试面板（仅开发环境显示）：可视化展示 Skill 命中、RAG 来源统计、改写查询、迭代轮次与重排模式。
+
+### 验证与运行状态
+
+- 后端健康检查、导游问答接口、行程规划接口均已实测通过。
+- Skill 验证脚本（ASGI / live）已可执行，定位与规避了本地代理干扰导致的假性 502 问题。
+
+### 运维建议
+
+- 生产环境建议开启 Redis 并配置：`MEMORY_REDIS_URL`、`MEMORY_REDIS_NAMESPACE`、`MEMORY_SESSION_TTL_SECONDS`。
+- 开发环境可开启导游调试开关进行链路排查；生产环境默认隐藏调试面板，避免暴露内部检索细节。
+
 ## 测试
 
 ```bash

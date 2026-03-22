@@ -35,6 +35,8 @@ passlib[bcrypt]>=1.7.4
 
 # 导游RAG（功能27）
 openai>=1.0.0
+chromadb>=0.5.23
+redis>=5.0.0
 
 # 其他工具
 python-dateutil>=2.8.2
