@@ -3,6 +3,10 @@
 import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from .rate_limit import limiter
 from loguru import logger
 from ..config import get_settings, validate_config, print_config
 from .routes import trip, poi, map as map_routes, share, auth, user, guide
@@ -38,6 +42,11 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# 注册限流器与错误处理
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 # 配置CORS
 app.add_middleware(

@@ -38,6 +38,9 @@ openai>=1.0.0
 chromadb>=0.5.23
 redis>=5.0.0
 
+# 限流
+slowapi>=0.1.9
+
 # 其他工具
 python-dateutil>=2.8.2
 huggingface_hub>=0.25.0

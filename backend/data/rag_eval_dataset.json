@@ -1,0 +1,107 @@
+[
+  {
+    "id": "eval-001",
+    "question": "故宫怎么游览比较合理？",
+    "city": "北京",
+    "attraction_name": "故宫博物院",
+    "relevant_doc_ids": ["bj-gugong-1", "bj-gugong-2"]
+  },
+  {
+    "id": "eval-002",
+    "question": "去故宫有什么注意事项？",
+    "city": "北京",
+    "attraction_name": "故宫博物院",
+    "relevant_doc_ids": ["bj-gugong-2", "bj-gugong-1"]
+  },
+  {
+    "id": "eval-003",
+    "question": "颐和园怎么安排行程？",
+    "city": "北京",
+    "attraction_name": "颐和园",
+    "relevant_doc_ids": ["bj-yiheyuan-1"]
+  },
+  {
+    "id": "eval-004",
+    "question": "爬长城需要注意什么？",
+    "city": "北京",
+    "attraction_name": "八达岭长城",
+    "relevant_doc_ids": ["bj-changcheng-1"]
+  },
+  {
+    "id": "eval-005",
+    "question": "北京有哪些值得推荐的景点？",
+    "city": "北京",
+    "attraction_name": "",
+    "relevant_doc_ids": ["bj-gugong-1", "bj-gugong-2", "bj-yiheyuan-1", "bj-changcheng-1"]
+  },
+  {
+    "id": "eval-006",
+    "question": "兵马俑怎么参观最好？",
+    "city": "西安",
+    "attraction_name": "秦始皇帝陵博物院(兵马俑)",
+    "relevant_doc_ids": ["xa-bingmayong-1"]
+  },
+  {
+    "id": "eval-007",
+    "question": "西安回民街怎么吃？",
+    "city": "西安",
+    "attraction_name": "回民街",
+    "relevant_doc_ids": ["xa-huiminjie-1"]
+  },
+  {
+    "id": "eval-008",
+    "question": "成都宽窄巷子有什么好玩的？",
+    "city": "成都",
+    "attraction_name": "宽窄巷子",
+    "relevant_doc_ids": ["cd-kuanzhai-1"]
+  },
+  {
+    "id": "eval-009",
+    "question": "熊猫基地什么时候去最好？",
+    "city": "成都",
+    "attraction_name": "成都大熊猫繁育研究基地",
+    "relevant_doc_ids": ["cd-panda-1"]
+  },
+  {
+    "id": "eval-010",
+    "question": "上海外滩夜景怎么拍？",
+    "city": "上海",
+    "attraction_name": "外滩",
+    "relevant_doc_ids": ["sh-waitan-1"]
+  },
+  {
+    "id": "eval-011",
+    "question": "豫园怎么游览？",
+    "city": "上海",
+    "attraction_name": "豫园",
+    "relevant_doc_ids": ["sh-yuyuan-1"]
+  },
+  {
+    "id": "eval-012",
+    "question": "旅游时在景区附近怎么选择餐厅？",
+    "city": "",
+    "attraction_name": "",
+    "relevant_doc_ids": ["general-food-1"]
+  },
+  {
+    "id": "eval-013",
+    "question": "旅游城市交通怎么安排？",
+    "city": "",
+    "attraction_name": "",
+    "relevant_doc_ids": ["general-transport-1"]
+  },
+  {
+    "id": "eval-014",
+    "question": "故宫门票多少钱，周几不开放？",
+    "city": "北京",
+    "attraction_name": "故宫博物院",
+    "relevant_doc_ids": ["bj-gugong-2", "bj-gugong-1"]
+  },
+  {
+    "id": "eval-015",
+    "question": "成都旅游推荐什么景点？",
+    "city": "成都",
+    "attraction_name": "",
+    "relevant_doc_ids": ["cd-kuanzhai-1", "cd-panda-1"]
+  }
+]

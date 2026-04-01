@@ -1,8 +1,9 @@
 """旅行规划API路由"""
 
 import json
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
+from ...api.rate_limit import limiter
 from loguru import logger
 from ...models.schemas import (
     TripRequest,
@@ -19,12 +20,13 @@ router = APIRouter(prefix="/trip", tags=["旅行规划"])
 
 # ===================== #14 SSE 流式接口 =====================
 
+@limiter.limit("5/minute")
 @router.post(
     "/plan/stream",
     summary="流式生成旅行计划（SSE）",
     description="使用 Server-Sent Events 实时推送每个 Agent 步骤的进度，最终返回完整行程数据"
 )
-async def plan_trip_stream(request: TripRequest):
+async def plan_trip_stream(request: Request, request_body: TripRequest):
     """
     SSE 流式旅行规划接口
 
@@ -37,7 +39,7 @@ async def plan_trip_stream(request: TripRequest):
 
     async def event_generator():
         try:
-            async for event in agent.plan_trip_stream(request):
+            async for event in agent.plan_trip_stream(request_body):
                 payload = json.dumps(event, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
         except Exception as e:
@@ -58,20 +60,21 @@ async def plan_trip_stream(request: TripRequest):
 
 # ===================== 原有 JSON 接口（保持向后兼容，已集成缓存+并行） =====================
 
+@limiter.limit("5/minute")
 @router.post(
     "/plan",
     response_model=TripPlanResponse,
     summary="生成旅行计划（JSON）",
     description="一次性返回完整旅行计划（内部走同一套并行+缓存逻辑）"
 )
-async def plan_trip(request: TripRequest):
+async def plan_trip(request: Request, request_body: TripRequest):
     """生成旅行计划（非流式，等待所有 Agent 完成后一次性返回）"""
     try:
-        logger.info(f"📥 旅行规划请求: {request.city} {request.start_date}~{request.end_date}")
+        logger.info(f"📥 旅行规划请求: {request_body.city} {request_body.start_date}~{request_body.end_date}")
         agent = get_trip_planner_agent()
 
         trip_plan_data = None
-        async for event in agent.plan_trip_stream(request):
+        async for event in agent.plan_trip_stream(request_body):
             if event.get("type") == "done":
                 trip_plan_data = event["data"]
             elif event.get("type") == "error":
@@ -95,13 +98,14 @@ async def plan_trip(request: TripRequest):
 
 # ===================== 功能20：AI 行程调整对话 =====================
 
+@limiter.limit("10/minute")
 @router.post(
     "/adjust",
     response_model=TripPlanResponse,
     summary="AI 行程调整（自然语言修改）",
     description="用户用自然语言描述修改要求，AI 返回更新后的行程（无需重新搜索)"
 )
-async def adjust_trip(body: TripAdjustRequest):
+async def adjust_trip(request: Request, body: TripAdjustRequest):
     """
     功能20：AI 行程调整对话。
     接收当前 TripPlan + 用户自然语言要求，由 Planner Agent 局部修改并返回新行程。

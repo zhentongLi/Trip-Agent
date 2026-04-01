@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -316,12 +317,13 @@ class GuideRAGService:
         result = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=max(top_k, 1),
-            include=["metadatas", "documents", "distances"],
+            include=["metadatas", "documents", "distances", "ids"],
         )
 
         metadatas = (result.get("metadatas") or [[]])[0]
         documents = (result.get("documents") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
+        chroma_ids = (result.get("ids") or [[]])[0]
 
         refs: List[Dict[str, Any]] = []
         for idx, md in enumerate(metadatas):
@@ -339,6 +341,7 @@ class GuideRAGService:
 
             refs.append(
                 {
+                    "doc_id": chroma_ids[idx] if idx < len(chroma_ids) else "",
                     "title": str(md.get("title", "")),
                     "city": doc_city,
                     "attraction_name": doc_spot,
@@ -441,6 +444,7 @@ class GuideRAGService:
         for score, doc in scored[:top_k]:
             refs.append(
                 {
+                    "doc_id": doc.get("id", ""),
                     "title": doc.get("title", ""),
                     "city": doc.get("city", ""),
                     "attraction_name": doc.get("attraction_name", ""),
@@ -487,6 +491,79 @@ class GuideRAGService:
                 return {}
         return {}
 
+    def _call_multi_query_stepback(
+        self,
+        client,
+        base: str,
+        city: str,
+        attraction_name: str,
+        memory_context: str,
+    ) -> List[str]:
+        """LLM call 1: Multi-Query + Step-Back 改写，返回生成的查询列表。"""
+        generated: List[str] = []
+        rewrite_prompt = (
+            "你是检索查询改写助手。请基于用户问题输出 JSON："
+            '{"queries": ["..."], "step_back": "..."}。\n'
+            "规则：queries 最多3条，必须与原问题语义等价但角度不同；"
+            "step_back 是一个更抽象、更通用的问题。\n"
+            f"城市上下文: {city or '未提供'}\n"
+            f"景点上下文: {attraction_name or '未提供'}\n"
+            f"用户历史记忆: {memory_context or '无'}\n"
+            f"原问题: {base}"
+        )
+        try:
+            resp = client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": "你是严谨的查询改写助手。"},
+                    {"role": "user", "content": rewrite_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=260,
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            obj = self._extract_json_obj(content)
+            q_items = obj.get("queries", []) if isinstance(obj, dict) else []
+            if isinstance(q_items, list) and self._enable_multi_query:
+                generated.extend(str(x) for x in q_items)
+            step_back = obj.get("step_back", "") if isinstance(obj, dict) else ""
+            if self._enable_step_back and isinstance(step_back, str):
+                generated.append(step_back)
+        except Exception as e:
+            logger.warning(f"Query Rewriting 失败，使用规则改写: {e}")
+        return generated
+
+    def _call_hyde(
+        self,
+        client,
+        base: str,
+        city: str,
+        attraction_name: str,
+    ) -> List[str]:
+        """LLM call 2: HyDE 改写，返回假设性答案文本列表。"""
+        generated: List[str] = []
+        hyde_prompt = (
+            "请针对下面问题写一段80-140字的假设性答案草稿，用于向量检索，不要编造具体数据。\n"
+            f"问题: {base}\n"
+            f"上下文: 城市={city or '未提供'} 景点={attraction_name or '未提供'}"
+        )
+        try:
+            resp = client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": "你是检索增强助手。"},
+                    {"role": "user", "content": hyde_prompt},
+                ],
+                temperature=0.4,
+                max_tokens=220,
+            )
+            hyde_text = (resp.choices[0].message.content or "").strip()
+            if hyde_text:
+                generated.append(hyde_text)
+        except Exception as e:
+            logger.warning(f"HyDE 改写失败，已忽略: {e}")
+        return generated
+
     def _rewrite_queries(
         self,
         question: str,
@@ -510,60 +587,28 @@ class GuideRAGService:
         client = self._get_client()
         generated: List[str] = []
 
-        if client is not None and (self._enable_multi_query or self._enable_step_back):
-            rewrite_prompt = (
-                "你是检索查询改写助手。请基于用户问题输出 JSON："
-                '{"queries": ["..."], "step_back": "..."}。\\n'
-                "规则：queries 最多3条，必须与原问题语义等价但角度不同；"
-                "step_back 是一个更抽象、更通用的问题。\\n"
-                f"城市上下文: {city or '未提供'}\\n"
-                f"景点上下文: {attraction_name or '未提供'}\\n"
-                f"用户历史记忆: {memory_context or '无'}\\n"
-                f"原问题: {base}"
-            )
-            try:
-                resp = client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": "你是严谨的查询改写助手。"},
-                        {"role": "user", "content": rewrite_prompt},
-                    ],
-                    temperature=0.2,
-                    max_tokens=260,
-                )
-                content = (resp.choices[0].message.content or "").strip()
-                obj = self._extract_json_obj(content)
-                q_items = obj.get("queries", []) if isinstance(obj, dict) else []
-                if isinstance(q_items, list) and self._enable_multi_query:
-                    generated.extend(str(x) for x in q_items)
+        run_mq_sb = client is not None and (self._enable_multi_query or self._enable_step_back)
+        run_hyde = client is not None and self._enable_hyde
 
-                step_back = obj.get("step_back", "") if isinstance(obj, dict) else ""
-                if self._enable_step_back and isinstance(step_back, str):
-                    generated.append(step_back)
-            except Exception as e:
-                logger.warning(f"Query Rewriting 失败，使用规则改写: {e}")
-
-        if self._enable_hyde and client is not None:
-            hyde_prompt = (
-                "请针对下面问题写一段80-140字的假设性答案草稿，用于向量检索，不要编造具体数据。\\n"
-                f"问题: {base}\\n"
-                f"上下文: 城市={city or '未提供'} 景点={attraction_name or '未提供'}"
-            )
-            try:
-                resp = client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": "你是检索增强助手。"},
-                        {"role": "user", "content": hyde_prompt},
-                    ],
-                    temperature=0.4,
-                    max_tokens=220,
+        if run_mq_sb and run_hyde:
+            # 两次 LLM 调用互相独立，用线程池并行执行
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_mq = pool.submit(
+                    self._call_multi_query_stepback,
+                    client, base, city, attraction_name, memory_context,
                 )
-                hyde_text = (resp.choices[0].message.content or "").strip()
-                if hyde_text:
-                    generated.append(hyde_text)
-            except Exception as e:
-                logger.warning(f"HyDE 改写失败，已忽略: {e}")
+                fut_hyde = pool.submit(
+                    self._call_hyde,
+                    client, base, city, attraction_name,
+                )
+                generated.extend(fut_mq.result())
+                generated.extend(fut_hyde.result())
+        elif run_mq_sb:
+            generated.extend(
+                self._call_multi_query_stepback(client, base, city, attraction_name, memory_context)
+            )
+        elif run_hyde:
+            generated.extend(self._call_hyde(client, base, city, attraction_name))
 
         merged = self._unique_texts(
             [*seeds, *generated],

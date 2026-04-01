@@ -1,6 +1,7 @@
 """导游 RAG API 路由（功能27）"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from ...api.rate_limit import limiter
 from loguru import logger
 
 from ...models.schemas import GuideAskRequest, GuideAskResponse, GuideReference
@@ -20,13 +21,14 @@ router = APIRouter(prefix="/guide", tags=["导游RAG"])
 #   "top_k": 4  # 可选，返回的参考文献数量
 # }
 
+@limiter.limit("20/minute")
 @router.post(
     "/ask",
     response_model=GuideAskResponse,
     summary="导游问答（RAG）",
     description="基于本地旅游知识库检索 + LLM 生成景点导览回答",
 )
-async def ask_guide(body: GuideAskRequest):
+async def ask_guide(request: Request, body: GuideAskRequest):
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="问题不能为空")

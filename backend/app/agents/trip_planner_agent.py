@@ -253,6 +253,8 @@ class MultiAgentTripPlanner:
             traceback.print_exc()
             raise
 
+    # ========== LLM 调用包装：限流 + 重试机制 ============
+    # 静态方法，供内部调用，判断是否属于可重试的上游临时错误（502/503/504、超时、连接重置、限流等），并在 plan_node 中使用包装后的调用。
     @staticmethod
     def _is_retryable_llm_error(err: Exception) -> bool:
         """判断是否属于可重试的上游临时错误。"""
@@ -567,6 +569,26 @@ class MultiAgentTripPlanner:
                 except Exception as e:
                     logger.warning(f"⚠️ 坐标修正失败 [{attraction.name}]: {e}")
 
+    def _geocode_city_center(self, city: str) -> tuple:
+        """调用高德地理编码 API 获取城市中心坐标，失败时回退到北京。"""
+        BEIJING_FALLBACK = (116.4, 39.9)
+        if not self.amap_api_key or not city:
+            return BEIJING_FALLBACK
+        try:
+            resp = requests.get(
+                "https://restapi.amap.com/v3/geocode/geo",
+                params={"address": city, "key": self.amap_api_key},
+                timeout=5,
+            )
+            data = resp.json()
+            if data.get("status") == "1" and data.get("geocodes"):
+                lng, lat = data["geocodes"][0]["location"].split(",")
+                logger.debug(f"🌏 城市中心坐标 [{city}]: {lng},{lat}")
+                return (float(lng), float(lat))
+        except Exception as e:
+            logger.warning(f"⚠️ 城市中心坐标获取失败 [{city}]: {e}")
+        return BEIJING_FALLBACK
+
     def _add_weather_warnings(self, trip_plan: TripPlan) -> None:
         """#13 天气预警：检测极端天气并为每日天气信息添加预警标签"""
         extreme_keywords = ["暴雨", "大暴雨", "特大暴雨", "台风", "暴雪", "大雪", "冰雪", "沙尘暴", "冰暴", "龙卷风"]
@@ -821,7 +843,9 @@ class MultiAgentTripPlanner:
         for i in range(total_days):
             current_date = start_date + timedelta(days=i)
             current_city = city_schedule[i] if i < len(city_schedule) else request.city
-            lng_base, lat_base = city_centers.get(current_city, (116.4, 39.9))
+            if current_city not in city_centers:
+                city_centers[current_city] = self._geocode_city_center(current_city)
+            lng_base, lat_base = city_centers[current_city]
 
             tmpl = meal_templates.get(current_city, {
                 "breakfast": f"{current_city}特色早餐馆",
