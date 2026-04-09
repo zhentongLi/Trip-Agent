@@ -16,89 +16,80 @@ conda run -n trip-agent python -m pytest tests/ -q
 conda run -n trip-agent python -m pytest tests/test_routes.py -q
 
 # Run a single test by name
-conda run -n trip-agent python -m pytest tests/test_routes.py::test_plan_trip -q
+conda run -n trip-agent python -m pytest tests/test_routes.py::TestTripAdjust::test_adjust_rejects_empty_message -q
 
 # Start development server
 uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
 
-# Install dependencies
-pip install -r requirements.txt
+# RAG evaluation (requires backend/data/rag_eval_dataset.json)
+conda run -n trip-agent python tests/evaluate_rag.py
+conda run -n trip-agent python tests/evaluate_rag.py --k 1 3 5 10 --output results.json
 ```
 
 ### Frontend (Vue 3 + TypeScript + Vite)
 
 ```bash
 cd frontend
-
-# Development server
-npm run dev
-
-# Production build
-npm run build
-
-# Preview build
-npm run preview
+npm run dev      # Development server (port 5173)
+npm run build    # Production build
 ```
 
-### One-Command Start
-
-From project root:
-```bash
-bash start.sh
-```
-Starts backend on port 8000, frontend on port 5173.
-
-### Docker
+### One-Command Start / Docker
 
 ```bash
+bash start.sh                 # backend :8000, frontend :5173
 docker-compose up --build
 ```
 
-## High-Level Architecture
+## Backend Architecture (`backend/app/`)
 
-### Project Overview
-
-AI-powered travel planning platform with:
-- 5-Agent parallel orchestration (Attraction, Weather, Hotel, Food, Planner)
-- SSE streaming progress (Start → Search → Plan → Postprocess → Complete)
-- Multi-city tour support with automatic day allocation
-- Guide RAG Q&A (ChromaDB + BM25 hybrid retrieval, optional CrossEncoder reranking)
-- JWT authentication + SQLite cloud storage
-- Features: PDF export, AI trip adjustment, shareable links (7-day TTL)
-
-### Backend Architecture (`backend/app/`)
+### Module Map
 
 ```
 app/
 ├── api/
-│   ├── main.py                    # FastAPI app, CORS, SlowAPI middleware registration
-│   ├── rate_limit.py              # Limiter singleton (slowapi, IP-based) — import from here to avoid circular imports
-│   └── routes/
-│       ├── trip.py                # /api/trip/* (plan/stream, adjust, export/pdf, share, cache)
-│       ├── guide.py               # /api/guide/ask (RAG Q&A)
-│       ├── auth.py                # /api/auth/* (register, login, me)
-│       ├── user.py                # /api/user/* (CRUD cloud trips)
-│       ├── share.py               # Share link management (7-day TTL cache)
-│       ├── map.py                 # /api/map/* (POI, weather, route)
-│       └── poi.py                 # Low-level POI search
-├── agents/trip_planner_agent.py   # LangGraph StateGraph: gather → plan → postprocess
-├── skills/
-│   ├── base.py                    # RuntimeSkill ABC (async run interface)
-│   ├── registry.py                # SkillRegistry (register/get by name)
-│   ├── router.py                  # FastAPI router: POST /api/skills/{name}
-│   └── guide_qa_skill.py          # GuideQASkill wrapping GuideRAGService
+│   ├── main.py          # FastAPI app init: CORS, SlowAPI, register_error_handlers()
+│   ├── rate_limit.py    # limiter singleton — always import from here (avoid circular)
+│   └── routes/          # All route handlers use Depends() — no direct singleton calls
+│       ├── trip.py      # /api/trip/* — injects MultiAgentTripPlanner + TTLCache
+│       ├── guide.py     # /api/guide/ask — injects SkillRouter
+│       ├── share.py     # Share link management
+│       ├── auth.py      # JWT auth
+│       ├── user.py      # Cloud trip CRUD
+│       └── map.py       # AMap POI/weather/route utilities
+├── agents/              # LangGraph multi-agent system (split from monolith in Phase 4)
+│   ├── planner.py       # MultiAgentTripPlanner — public API: plan_trip_stream, plan_trip, adjust_trip
+│   ├── nodes.py         # NodeFactory — gather / plan / postprocess LangGraph nodes
+│   ├── parsers.py       # extract_json_str, parse_trip_response, parse_adjust_response
+│   ├── prompts.py       # All 5 agent system prompts (ATTRACTION, WEATHER, HOTEL, FOOD, PLANNER)
+│   ├── state.py         # PlannerState TypedDict
+│   ├── tools.py         # make_amap_tools(client) → (search_places_tool, get_weather_tool)
+│   └── trip_planner_agent.py  # ← compatibility shim only; do not add logic here
+├── dependencies.py      # ALL FastAPI Depends() factories (get_llm, get_amap_client,
+│                        #   get_trip_planner, get_trip_cache, get_share_store, get_skill_router)
+├── errors/
+│   ├── types.py         # Exception hierarchy: AppError → ExternalServiceError → CircuitOpenError, etc.
+│   ├── schemas.py       # ErrorResponse Pydantic model
+│   └── handlers.py      # register_error_handlers(app) — called once in main.py
 ├── services/
-│   ├── amap_service.py            # AMap REST API wrapper
-│   ├── llm_service.py             # LLM client (OpenAI-compatible)
-│   ├── rag_service.py             # Guide RAG: ChromaDB + BM25 hybrid, optional CrossEncoder reranking
-│   ├── pdf_service.py             # ReportLab PDF generation
-│   ├── auth_service.py            # JWT token handling
-│   ├── share_service.py           # Share link cache (Redis-like TTL)
-│   └── cache_service.py           # Trip cache (in-memory TTLCache)
+│   ├── amap_rest_client.py  # AmapRestClient: search_places, get_weather, geocode, get_opening_hours
+│   │                        #   All calls go through CircuitBreaker (5 failures → 30s open)
+│   ├── circuit_breaker.py   # CircuitBreaker: CLOSED → OPEN → HALF_OPEN state machine
+│   ├── cache_service.py     # TTLCache (in-memory, GIL-safe) + make_trip_cache_key()
+│   ├── llm_service.py       # get_llm() factory — kept for legacy; prefer dependencies.py
+│   ├── rag_service.py       # ChromaDB + BM25 hybrid retrieval, optional CrossEncoder reranking
+│   ├── share_service.py     # ShareStore — in-memory 7-day TTL
+│   ├── memory_service.py    # Two-layer memory: session (Redis/local) + user profile
+│   └── pdf_service.py       # ReportLab PDF generation
+├── skills/
+│   ├── base.py          # RuntimeSkill ABC
+│   ├── registry.py      # SkillRegistry
+│   ├── router.py        # SkillRouter.dispatch(name, payload)
+│   └── guide_qa_skill.py
 ├── models/
-│   ├── schemas.py                 # Pydantic v2 models (TripRequest, TripPlan, etc.)
-│   └── db_models.py               # SQLModel tables (User, SavedTrip)
-└── config.py                      # pydantic-settings, env loading
+│   ├── schemas.py       # Pydantic v2: TripRequest, TripPlan, DayPlan, Attraction, Meal, …
+│   └── db_models.py     # SQLModel: User, SavedTrip (SQLite)
+└── config.py            # pydantic-settings (Settings), get_settings(), validate_config()
 ```
 
 ### LangGraph Agent Flow
@@ -106,62 +97,76 @@ app/
 ```
 START → gather → plan → postprocess → END
 
-gather:     Parallel 4-Agent calls (Attraction, Weather, Hotel, Food)
-            - Uses StructuredTool for AMap REST API (search_places, get_weather)
-            - Concurrent with asyncio.gather()
+gather:      NodeFactory.gather() — asyncio.gather() 4+ agents in parallel
+             Attraction × N cities, Weather × N cities, Hotel, Food
 
-plan:       Planner LLM integrates data → JSON TripPlan
-            - Retry logic with exponential backoff
-            - _is_retryable_llm_error() handles 502/503/timeouts
+plan:        NodeFactory.plan() — Planner LLM → JSON → parse_trip_response()
+             Retries up to 3× on 502/503/timeout via _invoke_with_retry()
 
-postprocess:
-            - _fix_coordinates(): Geocode attraction addresses
-            - _add_weather_warnings(): Extreme weather alerts
-            - _enrich_opening_hours(): Real-time POI hours
+postprocess: NodeFactory.postprocess() — synchronous
+             _fix_coordinates()     → AmapRestClient.geocode()
+             _add_weather_warnings() → regex on weather strings
+             _enrich_opening_hours() → AmapRestClient.get_opening_hours()
 ```
 
-### Frontend Architecture (`frontend/src/`)
+`plan_trip_stream()` accepts an optional `cache` parameter (TTLCache). Pass it from the route via `Depends(get_trip_cache)`.
 
-```
-src/
-├── App.vue                      # Router view, global providers
-├── views/
-│   ├── Home.vue                 # Trip planning form, SSE progress display
-│   └── Result.vue               # Map (AMap JS API), budget, weather, itinerary
-├── services/
-│   ├── api.ts                   # Axios + fetch SSE stream, localStorage history
-│   └── auth.ts                  # Reactive auth state (no Pinia)
-└── types/index.ts               # TypeScript interfaces
-```
+### Dependency Injection Pattern
 
-### Key Data Flow
+All services are provided through `app/dependencies.py`. Routes **must not** call `get_xxx()` functions directly:
 
-```
-Home Form → POST /api/trip/plan/stream (SSE)
-          → MultiAgentTripPlanner.plan_trip_stream()
-             1. Cache check (cache_service.trip_cache)
-             2. LangGraph.astream(initial_state)
-             3. gather node: 4 parallel agents → attraction/weather/hotel/food
-             4. plan node: LLM generates JSON TripPlan
-             5. postprocess: coordinate fix, weather warnings, opening hours
-             6. Write cache, stream SSE events
-          → Result view renders map, budget, weather, daily itinerary
+```python
+# CORRECT — route handler
+async def my_route(
+    agent: MultiAgentTripPlanner = Depends(get_trip_planner),
+    cache: TTLCache = Depends(get_trip_cache),
+): ...
+
+# WRONG — do not do this in routes
+agent = get_trip_planner_agent()   # deprecated shim, raises RuntimeError
 ```
 
-### API Endpoints Summary
+All factories in `dependencies.py` use `@lru_cache()` for process-level singletons.
 
-| Prefix | Route | Description |
-|--------|-------|-------------|
-| `/api/trip` | `POST /plan/stream` | SSE streaming generation |
-| | `POST /plan` | JSON one-shot |
-| | `POST /adjust` | AI natural language adjustment |
-| | `POST /export/pdf` | ReportLab PDF export |
-| | `GET /cache/stats`, `DELETE /cache` | Cache management |
-| | `POST /share`, `GET /share/{id}` | Share links (7-day TTL) |
-| `/api/guide` | `POST /ask` | RAG Q&A with trip context |
-| `/api/auth` | `POST /register`, `/login`, `GET /me` | JWT auth |
-| `/api/user` | `GET /trips`, `POST /trips`, `DELETE /trips/{id}` | Cloud trip CRUD |
-| `/api/map` | `GET /poi`, `/weather`, `POST /route` | AMap utilities |
+### Mocking Services in Tests
+
+Use `app.dependency_overrides` — never monkeypatch route modules directly:
+
+```python
+from app.api.main import app
+from app.dependencies import get_trip_planner
+from app.services.cache_service import TTLCache
+
+app.dependency_overrides[get_trip_planner] = lambda: FakePlanner()
+app.dependency_overrides[get_trip_cache]   = lambda: TTLCache(ttl_seconds=60)
+# ... run test ...
+app.dependency_overrides.pop(get_trip_planner, None)
+app.dependency_overrides.pop(get_trip_cache, None)
+```
+
+The `client_with_mock_planner` fixture in `conftest.py` handles this setup/teardown automatically.
+
+### Error Handling
+
+`register_error_handlers(app)` in `main.py` installs handlers for:
+- `AppError` subclasses → JSON `ErrorResponse` with typed `error_code`
+- `RequestValidationError` → 422 with field details
+- Unhandled `Exception` → 500 (safe message, full traceback logged)
+
+Raise `AppError` subclasses from business logic; avoid `HTTPException` inside service/agent code.
+
+### Rate Limiting
+
+Import `limiter` from `app.api.rate_limit` (not `main.py` — circular import).  
+Apply `@limiter.limit("N/minute")` **above** `@router.post(...)`. Handler's first param must be `request: Request`.
+
+Current limits: `/plan/stream` & `/plan` → 5/min · `/adjust` → 10/min · `/guide/ask` → 20/min
+
+**Known issue**: `SlowAPIMiddleware` is incompatible with `StreamingResponse`. For streaming endpoints, rate limiting must be handled manually inside `event_generator()` (catch `RateLimitExceeded`).
+
+### AMap Circuit Breaker
+
+`AmapRestClient` wraps all 5 AMap REST call sites. The `CircuitBreaker` trips after 5 consecutive failures (30s recovery). When open, calls immediately raise `CircuitOpenError` (HTTP 503). The singleton breaker is created in `dependencies.get_amap_client()`.
 
 ### Environment Variables
 
@@ -174,6 +179,11 @@ LLM_MODEL_ID=<model>
 PORT=8000
 CORS_ORIGINS=http://localhost:5173
 JWT_SECRET_KEY=<secret>
+# Optional
+UNSPLASH_ACCESS_KEY=<key>
+MEMORY_REDIS_URL=redis://...
+MEMORY_REDIS_NAMESPACE=trip_agent:memory
+MEMORY_SESSION_TTL_SECONDS=259200
 ```
 
 Frontend `.env`:
@@ -185,38 +195,15 @@ VITE_AMAP_SECURITY_CODE=<security code>
 
 ### Persistent Data (`backend/data/`)
 
-- `trip_planner.db` — SQLite database (User, SavedTrip tables via SQLModel)
+- `trip_planner.db` — SQLite (User, SavedTrip via SQLModel)
 - `chroma_guide/` — ChromaDB vector store for guide RAG
 - `guide_knowledge.json` — Source knowledge base ingested into ChromaDB
 - `user_profiles.json` — User profile store
+- `rag_eval_dataset.json` — 15 labeled Q&A pairs for RAG evaluation
 
-### Rate Limiting
+### Testing Notes
 
-Expensive endpoints use `slowapi` decorators. When adding a new rate-limited route:
-1. Import `limiter` from `app.api.rate_limit` (not from `main.py` — circular import)
-2. Apply `@limiter.limit("N/minute")` **above** `@router.post(...)`
-3. The handler's first parameter **must** be `request: Request` — slowapi requires it
-
-Current limits: `POST /plan/stream` & `/plan` → 5/min, `/adjust` → 10/min, `/guide/ask` → 20/min
-
-**Known issue**: `SlowAPIMiddleware` is incompatible with `StreamingResponse` — it causes `POST /plan/stream` to return HTTP 500. The decorator `@limiter.limit(...)` works for non-streaming routes; for streaming endpoints the 429 must be handled manually inside the `event_generator()` by catching `RateLimitExceeded`.
-
-### Testing
-
-Tests in `backend/tests/`:
-- `test_routes.py`: API route tests
-- `test_schemas.py`: Pydantic model validation
-- `test_share_service.py`: Share service TTL logic
-- `validate_skill_flow.py`: Skills system integration validation
-- `evaluate_rag.py`: RAG retrieval evaluation CLI (Hit@K, MRR, P@K, NDCG@K)
-
-Fixtures in `conftest.py` provide `async_client` and `sample_trip`.
-
-```bash
-# Run RAG evaluation (requires backend/data/rag_eval_dataset.json)
-cd backend
-conda run -n trip-agent python tests/evaluate_rag.py
-conda run -n trip-agent python tests/evaluate_rag.py --k 1 3 5 10 --output results.json
-```
-
-`rag_evaluator.py` in `services/` implements the metric functions; `rag_eval_dataset.json` in `data/` holds 15 labeled Q&A pairs covering all cities in the knowledge base.
+- `conftest.py` fixtures: `async_client` (no mocks), `client_with_mock_planner` (FakePlanner injected), `sample_trip` (deep-copied dict)
+- Tests do **not** hit real LLM or AMap — any test requiring those must use `client_with_mock_planner` or equivalent overrides
+- `validate_skill_flow.py` — skills integration smoke test (not part of pytest suite)
+- `evaluate_rag.py` — standalone RAG eval CLI, not run by default pytest

@@ -1,25 +1,15 @@
 """导游 RAG API 路由（功能27）"""
 
-from fastapi import APIRouter, HTTPException, Request
-from ...api.rate_limit import limiter
+from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 
+from ...api.rate_limit import limiter
+from ...dependencies import get_skill_router
 from ...models.schemas import GuideAskRequest, GuideAskResponse, GuideReference
-from ...skills.router import get_skill_router
+from ...skills.router import SkillRouter
 
 router = APIRouter(prefix="/guide", tags=["导游RAG"])
 
-
-# ===================== 导游问答接口（RAG） =====================
-# 前端请求示例：
-# POST /guide/ask
-# {
-#   "question": "请介绍一下故宫的历史背景和主要看点？",
-#   "city": "北京",
-#   "attraction_name": "故宫",
-#   "trip_plan": {...},  # 可选，当前行程计划上下文
-#   "top_k": 4  # 可选，返回的参考文献数量
-# }
 
 @limiter.limit("20/minute")
 @router.post(
@@ -28,14 +18,17 @@ router = APIRouter(prefix="/guide", tags=["导游RAG"])
     summary="导游问答（RAG）",
     description="基于本地旅游知识库检索 + LLM 生成景点导览回答",
 )
-async def ask_guide(request: Request, body: GuideAskRequest):
+async def ask_guide(
+    request: Request,
+    body: GuideAskRequest,
+    skill_router: SkillRouter = Depends(get_skill_router),
+):
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="问题不能为空")
 
     try:
         logger.info(f"🧭 导游问答请求: {question[:80]}")
-        skill_router = get_skill_router()
         result = await skill_router.dispatch(
             "guide_qa",
             {

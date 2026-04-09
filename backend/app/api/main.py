@@ -11,6 +11,7 @@ from loguru import logger
 from ..config import get_settings, validate_config, print_config
 from .routes import trip, poi, map as map_routes, share, auth, user, guide
 from ..models.db_models import create_db_tables
+from ..errors import register_error_handlers
 
 # ========== loguru 全局配置 ==========
 # 移除默认 handler，重新配置格式
@@ -47,6 +48,9 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+# 注册集中式错误处理器（AppError、RequestValidationError、兜底 Exception）
+register_error_handlers(app)
 
 # 配置CORS
 app.add_middleware(

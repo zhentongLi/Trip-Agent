@@ -102,27 +102,14 @@ class TestTripAdjust:
         resp = await client.post("/api/trip/adjust", json=payload)
         assert resp.status_code in (400, 422)
 
-    async def test_adjust_with_valid_payload_calls_agent(self, client, monkeypatch):
-        """将 get_trip_planner_agent mock 掉，验证路由层调用链正常"""
-        import app.api.routes.trip as trip_module
-        from app.models.schemas import TripPlan
-
-        adjusted_plan = {**SAMPLE_TRIP_PLAN}
-        adjusted_plan["overall_suggestions"] = "已调整"
-
-        class FakePlanner:
-            async def adjust_trip(self, trip_plan, user_message, city=""):
-                return TripPlan(**adjusted_plan)
-
-        monkeypatch.setattr(trip_module, "get_trip_planner_agent", lambda: FakePlanner())
-
+    async def test_adjust_with_valid_payload_calls_agent(self, client_with_mock_planner):
+        """通过 dependency_overrides 注入 FakePlanner，验证路由层调用链正常"""
         payload = {
             "trip_plan": SAMPLE_TRIP_PLAN,
             "user_message": "把第一天景点换成颐和园",
             "city": "北京",
         }
-        resp = await client.post("/api/trip/adjust", json=payload)
-        # mock 正常，应返回 200
+        resp = await client_with_mock_planner.post("/api/trip/adjust", json=payload)
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
