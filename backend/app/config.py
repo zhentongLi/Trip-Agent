@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 from typing import List
+from pydantic import ConfigDict, Field
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
@@ -46,10 +47,11 @@ class Settings(BaseSettings):
     # 日志配置
     log_level: str = "INFO"
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-        extra = "ignore"  # 忽略额外的环境变量
+    # JWT 配置
+    jwt_secret_key: str = Field(default="")
+    jwt_expire_days: int = Field(default=7)
+
+    model_config = ConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
     def get_cors_origins_list(self) -> List[str]:
         """获取CORS origins列表"""
@@ -73,6 +75,9 @@ def validate_config():
 
     if not settings.amap_api_key:
         errors.append("AMAP_API_KEY未配置")
+
+    if not settings.jwt_secret_key:
+        errors.append("JWT_SECRET_KEY未配置（生产环境必须设置，否则每次重启会使所有token失效）")
 
     # HelloAgentsLLM会自动从LLM_API_KEY读取,不强制要求OPENAI_API_KEY
     llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")

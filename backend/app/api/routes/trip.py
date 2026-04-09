@@ -1,5 +1,6 @@
 """旅行规划API路由"""
 
+import asyncio
 import json
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -141,7 +142,7 @@ async def export_trip_pdf(plan: TripPlan):
     """后端 ReportLab PDF 导出"""
     try:
         logger.info(f"📄 PDF 导出请求: {plan.city} {plan.start_date}")
-        pdf_bytes = generate_trip_pdf(plan)
+        pdf_bytes = await asyncio.to_thread(generate_trip_pdf, plan)
         filename = f"trip_{plan.city}_{plan.start_date}.pdf"
         logger.success(f"✅ PDF 生成成功，大小: {len(pdf_bytes):,} bytes")
         return Response(

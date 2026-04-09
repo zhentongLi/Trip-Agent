@@ -4,9 +4,11 @@ POST /api/auth/register  — 注册
 POST /api/auth/login     — 登录 → JWT
 GET  /api/auth/me        — 当前用户信息（需 Bearer token）
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlmodel import Session
+
+from ...api.rate_limit import limiter
 
 from ...models.db_models import (
     UserRegisterRequest,
@@ -43,8 +45,9 @@ def _current_user_id(
 
 # ─── 注册 ─────────────────────────────────────────────────────────────────
 
+@limiter.limit("5/minute")
 @router.post("/register", response_model=TokenResponse, summary="用户注册")
-def register(body: UserRegisterRequest, session: Session = Depends(get_session)):
+def register(request: Request, body: UserRegisterRequest, session: Session = Depends(get_session)):
     # 检查用户名重复
     if get_user_by_username(session, body.username):
         raise HTTPException(status_code=400, detail="用户名已被占用")
@@ -59,8 +62,9 @@ def register(body: UserRegisterRequest, session: Session = Depends(get_session))
 
 # ─── 登录 ─────────────────────────────────────────────────────────────────
 
+@limiter.limit("10/minute")
 @router.post("/login", response_model=TokenResponse, summary="用户登录")
-def login(body: UserLoginRequest, session: Session = Depends(get_session)):
+def login(request: Request, body: UserLoginRequest, session: Session = Depends(get_session)):
     user = authenticate_user(session, body.username, body.password)
     if not user:
         raise HTTPException(

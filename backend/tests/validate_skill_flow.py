@@ -29,7 +29,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.api.main import app
-from app.skills.router import get_skill_router
+from app.dependencies import get_skill_router
 
 
 @dataclass
