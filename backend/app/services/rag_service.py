@@ -31,6 +31,7 @@ except Exception:  # pragma: no cover - reranker 可选依赖
 
 from ..config import get_settings
 from ..models.schemas import TripPlan
+from .cache_service import TTLCache
 
 _TOKEN_PATTERN = re.compile(r"[a-zA-Z0-9]+|[\u4e00-\u9fff]")
 
@@ -77,6 +78,9 @@ class GuideRAGService:
 
         self._init_embedding_strategy()
         self._init_vector_store()
+
+        _rerank_cache_ttl = int(os.getenv("RAG_RERANK_CACHE_TTL", str(24 * 3600)))
+        self._rerank_cache: TTLCache = TTLCache(ttl_seconds=_rerank_cache_ttl)
 
     @staticmethod
     def _env_bool(name: str, default: bool) -> bool:
@@ -645,6 +649,17 @@ class GuideRAGService:
         merged.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
         return merged
 
+    def _make_rerank_cache_key(
+        self, query: str, candidates: List[Dict[str, Any]], top_k: int
+    ) -> str:
+        """按 query + candidates 指纹 + top_k 生成 MD5 缓存 key。"""
+        candidate_fp = sorted(
+            (c.get("doc_id", ""), round(float(c.get("score", 0.0)), 4))
+            for c in candidates
+        )
+        raw = f"{query.lower().strip()}|{candidate_fp}|{top_k}"
+        return "rerank:" + hashlib.md5(raw.encode()).hexdigest()[:16]
+
     def _rerank_candidates(
         self,
         query: str,
@@ -656,6 +671,12 @@ class GuideRAGService:
 
         # 优先 Cross-Encoder；不可用时退化为轻量重排（融合 lexical + 初始召回分）
         if self._enable_rerank and self._reranker is not None:
+            cache_key = self._make_rerank_cache_key(query, candidates, top_k)
+            cached = self._rerank_cache.get(cache_key)
+            if cached is not None:
+                logger.debug(f"Cross-Encoder 缓存命中: {cache_key}")
+                return cached
+
             try:
                 pairs = [(query, self._ref_to_text(ref)) for ref in candidates]
                 scores = self._reranker.predict(pairs)
@@ -671,7 +692,9 @@ class GuideRAGService:
                     ),
                     reverse=True,
                 )
-                return reranked[:top_k]
+                result = reranked[:top_k]
+                self._rerank_cache.set(cache_key, result)
+                return result
             except Exception as e:
                 logger.warning(f"Cross-Encoder 重排失败，降级为轻量重排: {e}")
 
