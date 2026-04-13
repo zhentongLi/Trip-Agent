@@ -116,3 +116,10 @@ def get_skill_router() -> SkillRouter:
     registry = SkillRegistry()
     registry.register(GuideQASkill())
     return SkillRouter(registry)
+
+
+def get_memory_service():
+    """MemoryService 单例，支持 dependency_overrides 覆盖。"""
+    from .services.memory_service import get_memory_service as _impl
+    from .services.memory_service import MemoryService  # noqa: F401 — for type hints
+    return _impl()

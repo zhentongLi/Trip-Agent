@@ -46,7 +46,7 @@ class GuideQASkill(RuntimeSkill):
         """
         service = get_guide_rag_service()
         memory = get_memory_service()
-        memory_context = memory.build_context(session_id)
+        memory_context = await memory.async_build_context(session_id)
 
         result = await asyncio.to_thread(
             service.ask,
@@ -65,7 +65,7 @@ class GuideQASkill(RuntimeSkill):
             "debug": debug,
         }
 
-        memory.record_turn(
+        await memory.async_record_turn(
             session_id=session_id,
             user_message=question,
             assistant_message=result.get("answer", ""),

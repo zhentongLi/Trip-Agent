@@ -9,11 +9,13 @@ If Redis is not available, falls back to local in-process memory + JSON profile 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -24,6 +26,13 @@ try:
     from redis import Redis
 except Exception:
     Redis = None
+
+try:
+    from redis.asyncio import Redis as AsyncRedis
+    from redis.asyncio import ConnectionPool as AsyncConnectionPool
+except Exception:
+    AsyncRedis = None
+    AsyncConnectionPool = None
 
 from .llm_service import get_llm
 
@@ -43,6 +52,9 @@ class MemoryService:
         self._session_ttl_seconds = self._parse_int_env(
             "MEMORY_SESSION_TTL_SECONDS", default=3 * 24 * 3600
         )
+        self._profile_ttl_seconds = self._parse_int_env(
+            "MEMORY_PROFILE_TTL_SECONDS", default=30 * 24 * 3600
+        )
         self._redis = self._init_redis_client()
 
         self._profile_path = self._data_dir / "user_profiles.json"
@@ -54,6 +66,10 @@ class MemoryService:
         self._lock = threading.Lock()
         self._max_short_messages = 6
         self._compress_token_threshold = 2800
+
+        # Async Redis client — lazily initialized on first async call
+        self._async_redis: AsyncRedis | None = None
+        self._async_redis_lock: asyncio.Lock | None = None
 
     @staticmethod
     def _parse_int_env(name: str, default: int) -> int:
@@ -122,6 +138,10 @@ class MemoryService:
             encoding="utf-8",
         )
 
+    # -------------------------------------------------------------------------
+    # Sync private storage methods
+    # -------------------------------------------------------------------------
+
     def _get_session_messages(self, sid: str) -> List[Dict[str, str]]:
         if self._redis:
             raw_items = self._redis.lrange(self._key("session", sid, "messages"), 0, -1)
@@ -183,31 +203,7 @@ class MemoryService:
             raw = self._redis.hgetall(self._key("profile", sid))
             if not raw:
                 return {}
-
-            disliked: List[str] = []
-            destinations: List[str] = []
-            try:
-                disliked_raw = raw.get("disliked", "[]")
-                disliked_obj = json.loads(disliked_raw)
-                if isinstance(disliked_obj, list):
-                    disliked = [str(x) for x in disliked_obj if str(x).strip()]
-            except Exception:
-                disliked = []
-
-            try:
-                destinations_raw = raw.get("history_destinations", "[]")
-                destinations_obj = json.loads(destinations_raw)
-                if isinstance(destinations_obj, list):
-                    destinations = [str(x) for x in destinations_obj if str(x).strip()]
-            except Exception:
-                destinations = []
-
-            return {
-                "budget": str(raw.get("budget", "")),
-                "travel_style": str(raw.get("travel_style", "")),
-                "disliked": disliked,
-                "history_destinations": destinations,
-            }
+            return self._deserialize_profile(raw)
 
         data = self._profiles.get(sid)
         if not isinstance(data, dict):
@@ -223,33 +219,205 @@ class MemoryService:
         return profile
 
     def _set_profile(self, sid: str, profile: Dict[str, Any]) -> None:
-        safe_profile = self._default_profile()
-        safe_profile["budget"] = str(profile.get("budget", "")).strip()
-        safe_profile["travel_style"] = str(profile.get("travel_style", "")).strip()
-        safe_profile["disliked"] = [
-            str(x).strip() for x in profile.get("disliked", []) if str(x).strip()
-        ]
-        safe_profile["history_destinations"] = [
-            str(x).strip() for x in profile.get("history_destinations", []) if str(x).strip()
-        ]
+        safe_profile = self._build_safe_profile(profile)
 
         if self._redis:
-            self._redis.hset(
-                self._key("profile", sid),
-                mapping={
-                    "budget": safe_profile["budget"],
-                    "travel_style": safe_profile["travel_style"],
-                    "disliked": json.dumps(safe_profile["disliked"], ensure_ascii=False),
-                    "history_destinations": json.dumps(
-                        safe_profile["history_destinations"], ensure_ascii=False
-                    ),
-                    "updated_at": str(int(time.time())),
-                },
-            )
+            key = self._key("profile", sid)
+            pipe = self._redis.pipeline()
+            pipe.hset(key, mapping=self._serialize_profile(safe_profile))
+            if self._profile_ttl_seconds > 0:
+                pipe.expire(key, self._profile_ttl_seconds)
+            pipe.execute()
             return
 
         self._profiles[sid] = safe_profile
         self._save_profiles()
+
+    # -------------------------------------------------------------------------
+    # Shared helpers for serialization / deserialization
+    # -------------------------------------------------------------------------
+
+    def _deserialize_profile(self, raw: Dict[str, str]) -> Dict[str, Any]:
+        disliked: List[str] = []
+        destinations: List[str] = []
+        try:
+            disliked_obj = json.loads(raw.get("disliked", "[]"))
+            if isinstance(disliked_obj, list):
+                disliked = [str(x) for x in disliked_obj if str(x).strip()]
+        except Exception:
+            disliked = []
+        try:
+            destinations_obj = json.loads(raw.get("history_destinations", "[]"))
+            if isinstance(destinations_obj, list):
+                destinations = [str(x) for x in destinations_obj if str(x).strip()]
+        except Exception:
+            destinations = []
+        return {
+            "budget": str(raw.get("budget", "")),
+            "travel_style": str(raw.get("travel_style", "")),
+            "disliked": disliked,
+            "history_destinations": destinations,
+        }
+
+    def _build_safe_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        safe = self._default_profile()
+        safe["budget"] = str(profile.get("budget", "")).strip()
+        safe["travel_style"] = str(profile.get("travel_style", "")).strip()
+        safe["disliked"] = [
+            str(x).strip() for x in profile.get("disliked", []) if str(x).strip()
+        ]
+        safe["history_destinations"] = [
+            str(x).strip() for x in profile.get("history_destinations", []) if str(x).strip()
+        ]
+        return safe
+
+    def _serialize_profile(self, safe_profile: Dict[str, Any]) -> Dict[str, str]:
+        return {
+            "budget": safe_profile["budget"],
+            "travel_style": safe_profile["travel_style"],
+            "disliked": json.dumps(safe_profile["disliked"], ensure_ascii=False),
+            "history_destinations": json.dumps(
+                safe_profile["history_destinations"], ensure_ascii=False
+            ),
+            "updated_at": str(int(time.time())),
+        }
+
+    # -------------------------------------------------------------------------
+    # Async private storage methods
+    # -------------------------------------------------------------------------
+
+    async def _get_async_redis(self) -> AsyncRedis | None:
+        """懒初始化 async Redis 客户端（double-checked locking）。"""
+        if self._async_redis is not None:
+            return self._async_redis
+        # asyncio.Lock must be created inside an event loop
+        if self._async_redis_lock is None:
+            self._async_redis_lock = asyncio.Lock()
+        async with self._async_redis_lock:
+            if self._async_redis is not None:
+                return self._async_redis
+            if AsyncRedis is None:
+                return None
+            redis_url = (os.getenv("MEMORY_REDIS_URL") or os.getenv("REDIS_URL") or "").strip()
+            if not redis_url:
+                return None
+            try:
+                max_conn = self._parse_int_env("MEMORY_REDIS_MAX_CONNECTIONS", default=20)
+                pool = AsyncConnectionPool.from_url(
+                    redis_url,
+                    decode_responses=True,
+                    socket_connect_timeout=2,
+                    socket_timeout=2,
+                    health_check_interval=30,
+                    max_connections=max_conn,
+                )
+                client = AsyncRedis(connection_pool=pool)
+                await client.ping()
+                logger.info("MemoryService async Redis 已连接")
+                self._async_redis = client
+            except Exception as e:
+                logger.warning(f"Async Redis 初始化失败，回退到本地存储: {e}")
+            return self._async_redis
+
+    async def _async_get_session_messages(self, sid: str) -> List[Dict[str, str]]:
+        client = await self._get_async_redis()
+        if client:
+            raw_items = await client.lrange(self._key("session", sid, "messages"), 0, -1)
+            messages: List[Dict[str, str]] = []
+            for item in raw_items:
+                try:
+                    obj = json.loads(item)
+                    if isinstance(obj, dict):
+                        messages.append(
+                            {
+                                "role": str(obj.get("role", "user")),
+                                "content": str(obj.get("content", "")),
+                            }
+                        )
+                except Exception:
+                    continue
+            return messages
+        return list(self._session_messages.get(sid, []))
+
+    async def _async_set_session_messages(
+        self, sid: str, messages: List[Dict[str, str]]
+    ) -> None:
+        client = await self._get_async_redis()
+        if client:
+            key = self._key("session", sid, "messages")
+            async with client.pipeline(transaction=False) as pipe:
+                await pipe.delete(key)
+                if messages:
+                    payload = [json.dumps(m, ensure_ascii=False) for m in messages]
+                    await pipe.rpush(key, *payload)
+                if self._session_ttl_seconds > 0:
+                    await pipe.expire(key, self._session_ttl_seconds)
+                await pipe.execute()
+            return
+        self._session_messages[sid] = list(messages)
+
+    async def _async_get_session_summary(self, sid: str) -> str:
+        client = await self._get_async_redis()
+        if client:
+            value = await client.get(self._key("session", sid, "summary"))
+            return (value or "").strip()
+        return str(self._session_summary.get(sid, ""))
+
+    async def _async_set_session_summary(self, sid: str, summary: str) -> None:
+        text = (summary or "").strip()
+        client = await self._get_async_redis()
+        if client:
+            key = self._key("session", sid, "summary")
+            if text:
+                if self._session_ttl_seconds > 0:
+                    await client.set(key, text, ex=self._session_ttl_seconds)
+                else:
+                    await client.set(key, text)
+            else:
+                await client.delete(key)
+            return
+        if text:
+            self._session_summary[sid] = text
+        elif sid in self._session_summary:
+            self._session_summary.pop(sid, None)
+
+    async def _async_get_profile(self, sid: str) -> Dict[str, Any]:
+        client = await self._get_async_redis()
+        if client:
+            raw = await client.hgetall(self._key("profile", sid))
+            if not raw:
+                return {}
+            return self._deserialize_profile(raw)
+
+        data = self._profiles.get(sid)
+        if not isinstance(data, dict):
+            return {}
+        profile = self._default_profile()
+        profile["budget"] = str(data.get("budget", ""))
+        profile["travel_style"] = str(data.get("travel_style", ""))
+        profile["disliked"] = [str(x) for x in data.get("disliked", []) if str(x).strip()]
+        profile["history_destinations"] = [
+            str(x) for x in data.get("history_destinations", []) if str(x).strip()
+        ]
+        return profile
+
+    async def _async_set_profile(self, sid: str, profile: Dict[str, Any]) -> None:
+        safe_profile = self._build_safe_profile(profile)
+        client = await self._get_async_redis()
+        if client:
+            key = self._key("profile", sid)
+            async with client.pipeline(transaction=True) as pipe:
+                await pipe.hset(key, mapping=self._serialize_profile(safe_profile))
+                if self._profile_ttl_seconds > 0:
+                    await pipe.expire(key, self._profile_ttl_seconds)
+                await pipe.execute()
+            return
+        self._profiles[sid] = safe_profile
+        self._save_profiles()
+
+    # -------------------------------------------------------------------------
+    # Text processing helpers
+    # -------------------------------------------------------------------------
 
     @staticmethod
     def _estimate_tokens(messages: List[Dict[str, str]]) -> int:
@@ -294,9 +462,30 @@ class MemoryService:
                 dislikes.append(item)
         return dislikes
 
+    # -------------------------------------------------------------------------
+    # History compression
+    # -------------------------------------------------------------------------
+
+    def _run_compression_llm(self, raw_old_text: str) -> str:
+        """同步 LLM 调用，供 asyncio.to_thread 包装使用。"""
+        llm = get_llm()
+        prompt = (
+            "请将以下对话历史压缩为不超过120字的中文摘要，重点保留：用户预算、偏好、禁忌、"
+            "已讨论目的地和关键约束。\n\n"
+            f"{raw_old_text}"
+        )
+        resp = llm.invoke([
+            SystemMessage(content="你是对话压缩助手。"),
+            HumanMessage(content=prompt),
+        ])
+        return (getattr(resp, "content", "") or "").strip()
+
     def _compress_history(self, session_id: str) -> None:
         messages = self._get_session_messages(session_id)
-        if len(messages) <= self._max_short_messages and self._estimate_tokens(messages) <= self._compress_token_threshold:
+        if (
+            len(messages) <= self._max_short_messages
+            and self._estimate_tokens(messages) <= self._compress_token_threshold
+        ):
             return
 
         keep_recent = messages[-self._max_short_messages:]
@@ -310,17 +499,7 @@ class MemoryService:
         summary = ""
 
         try:
-            llm = get_llm()
-            prompt = (
-                "请将以下对话历史压缩为不超过120字的中文摘要，重点保留：用户预算、偏好、禁忌、"
-                "已讨论目的地和关键约束。\n\n"
-                f"{raw_old_text}"
-            )
-            resp = llm.invoke([
-                SystemMessage(content="你是对话压缩助手。"),
-                HumanMessage(content=prompt),
-            ])
-            summary = (getattr(resp, "content", "") or "").strip()
+            summary = self._run_compression_llm(raw_old_text)
         except Exception as e:
             logger.warning(f"历史摘要失败，使用规则摘要: {e}")
 
@@ -331,6 +510,41 @@ class MemoryService:
 
         self._set_session_summary(session_id, summary[:240])
         self._set_session_messages(session_id, keep_recent)
+
+    async def _async_compress_history(self, session_id: str) -> None:
+        messages = await self._async_get_session_messages(session_id)
+        if (
+            len(messages) <= self._max_short_messages
+            and self._estimate_tokens(messages) <= self._compress_token_threshold
+        ):
+            return
+
+        keep_recent = messages[-self._max_short_messages:]
+        old_messages = messages[:-self._max_short_messages]
+        if not old_messages:
+            return
+
+        raw_old_text = "\n".join(
+            f"{m.get('role', 'user')}: {m.get('content', '')}" for m in old_messages
+        )
+        summary = ""
+
+        try:
+            summary = await asyncio.to_thread(self._run_compression_llm, raw_old_text)
+        except Exception as e:
+            logger.warning(f"异步历史摘要失败，使用规则摘要: {e}")
+
+        if not summary:
+            summary = "；".join(
+                (m.get("content", "")[:30] for m in old_messages[-3:] if m.get("content"))
+            )
+
+        await self._async_set_session_summary(session_id, summary[:240])
+        await self._async_set_session_messages(session_id, keep_recent)
+
+    # -------------------------------------------------------------------------
+    # Public sync API (preserved for backwards compatibility)
+    # -------------------------------------------------------------------------
 
     def record_turn(
         self,
@@ -381,6 +595,69 @@ class MemoryService:
             summary = self._get_session_summary(sid)
             recent = self._get_session_messages(sid)
 
+        return self._format_context(profile, summary, recent)
+
+    # -------------------------------------------------------------------------
+    # Public async API (non-blocking, used by GuideQASkill)
+    # -------------------------------------------------------------------------
+
+    async def async_build_context(self, session_id: str) -> str:
+        sid = (session_id or "default").strip() or "default"
+        profile = await self._async_get_profile(sid)
+        summary = await self._async_get_session_summary(sid)
+        recent = await self._async_get_session_messages(sid)
+        return self._format_context(profile, summary, recent)
+
+    async def async_record_turn(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_message: str,
+        city: str = "",
+        attraction_name: str = "",
+    ) -> None:
+        sid = (session_id or "default").strip() or "default"
+
+        msgs = await self._async_get_session_messages(sid)
+        msgs.append({"role": "user", "content": user_message})
+        msgs.append({"role": "assistant", "content": assistant_message})
+        await self._async_set_session_messages(sid, msgs)
+
+        profile = await self._async_get_profile(sid)
+
+        budget = self._extract_budget(user_message)
+        if budget:
+            profile["budget"] = budget
+
+        style = self._extract_style(user_message)
+        if style:
+            profile["travel_style"] = style
+
+        disliked = self._extract_disliked(user_message)
+        existing_disliked = profile.setdefault("disliked", [])
+        for item in disliked:
+            if item not in existing_disliked:
+                existing_disliked.append(item)
+
+        destinations = profile.setdefault("history_destinations", [])
+        for place in (city, attraction_name):
+            place = (place or "").strip()
+            if place and place not in destinations:
+                destinations.append(place)
+
+        await self._async_compress_history(sid)
+        await self._async_set_profile(sid, profile)
+
+    # -------------------------------------------------------------------------
+    # Private formatting helper (shared by sync and async build_context)
+    # -------------------------------------------------------------------------
+
+    def _format_context(
+        self,
+        profile: Dict[str, Any],
+        summary: str,
+        recent: List[Dict[str, str]],
+    ) -> str:
         lines: List[str] = []
 
         if profile:
@@ -407,11 +684,6 @@ class MemoryService:
         return "\n".join(lines).strip()
 
 
-_memory_service_instance: MemoryService | None = None
-
-
+@lru_cache()
 def get_memory_service() -> MemoryService:
-    global _memory_service_instance
-    if _memory_service_instance is None:
-        _memory_service_instance = MemoryService()
-    return _memory_service_instance
+    return MemoryService()
