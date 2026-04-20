@@ -205,7 +205,7 @@ class MultiAgentTripPlanner:
                 transportation=request.transportation,
                 budget_limit=request.budget_limit,
             )
-            cached = cache.get(cache_key)
+            cached = await cache.aget(cache_key)
             if cached is not None:
                 logger.info(f"⚡ 命中缓存: {cache_key}")
                 yield {"type": "progress", "percent": 95, "message": "⚡ 从缓存返回结果，秒级响应..."}
@@ -250,7 +250,7 @@ class MultiAgentTripPlanner:
                     trip_plan: Optional[TripPlan] = node_output.get("trip_plan")
                     if trip_plan and not node_output.get("error"):
                         if cache is not None and cache_key:
-                            cache.set(cache_key, trip_plan.model_dump())
+                            await cache.aset(cache_key, trip_plan.model_dump())
                             logger.success(f"💾 已写入缓存: {cache_key}")
                         yield {"type": "progress", "percent": 100, "message": "✅ 完成！"}
                         yield {"type": "done", "data": trip_plan.model_dump()}

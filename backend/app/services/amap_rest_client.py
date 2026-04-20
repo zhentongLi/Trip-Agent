@@ -247,3 +247,22 @@ class AmapRestClient:
         except Exception as e:
             logger.debug(f"获取开放时间失败 [{name}]: {e}")
         return None
+
+    async def get_opening_hours_async(self, name: str, city: str) -> Optional[str]:
+        """异步获取 POI 开放时间，返回字符串或 None"""
+        try:
+            data = await self._get_async(
+                "/v3/place/text",
+                {"keywords": name, "city": city, "output": "json"},
+            )
+            if data.get("status") == "1" and data.get("pois"):
+                poi = data["pois"][0]
+                biz = poi.get("biz_ext") or {}
+                return (
+                    biz.get("opentime")
+                    or poi.get("business_area")
+                    or None
+                )
+        except Exception as e:
+            logger.debug(f"异步获取开放时间失败 [{name}]: {e}")
+        return None

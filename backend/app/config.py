@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 from typing import List
+from pydantic import AliasChoices, ConfigDict, Field
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
@@ -46,10 +47,37 @@ class Settings(BaseSettings):
     # 日志配置
     log_level: str = "INFO"
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-        extra = "ignore"  # 忽略额外的环境变量
+    # JWT 配置
+    jwt_secret_key: str = Field(default="")
+    jwt_expire_days: int = Field(default=7)
+
+    # Redis 配置（兼容旧 MEMORY_REDIS_URL 和新 REDIS_URL）
+    redis_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("MEMORY_REDIS_URL", "REDIS_URL"),
+    )
+    redis_namespace: str = Field(
+        default="trip_agent",
+        validation_alias=AliasChoices("MEMORY_REDIS_NAMESPACE", "REDIS_NAMESPACE"),
+    )
+    session_ttl_seconds: int = Field(
+        default=259200,  # 3 days
+        validation_alias=AliasChoices("MEMORY_SESSION_TTL_SECONDS", "SESSION_TTL_SECONDS"),
+    )
+    trip_cache_ttl_seconds: int = Field(default=3600, alias="TRIP_CACHE_TTL_SECONDS")
+    share_ttl_seconds: int = Field(default=604800, alias="SHARE_TTL_SECONDS")  # 7 days
+    rag_rerank_ttl_seconds: int = Field(default=86400, alias="RAG_RERANK_TTL_SECONDS")
+    circuit_breaker_redis_enabled: bool = Field(
+        default=False, alias="CIRCUIT_BREAKER_REDIS_ENABLED"
+    )
+    redis_disable: bool = Field(default=False, alias="REDIS_DISABLE")
+
+    model_config = ConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     def get_cors_origins_list(self) -> List[str]:
         """获取CORS origins列表"""
@@ -73,6 +101,9 @@ def validate_config():
 
     if not settings.amap_api_key:
         errors.append("AMAP_API_KEY未配置")
+
+    if not settings.jwt_secret_key:
+        errors.append("JWT_SECRET_KEY未配置（生产环境必须设置，否则每次重启会使所有token失效）")
 
     # HelloAgentsLLM会自动从LLM_API_KEY读取,不强制要求OPENAI_API_KEY
     llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")

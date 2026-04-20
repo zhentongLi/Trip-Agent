@@ -181,16 +181,18 @@ class NodeFactory:
     # 节点 3：postprocess（坐标修正 + 天气预警 + 开放时间）
     # ──────────────────────────────────────────
 
-    def postprocess(self, state: PlannerState) -> dict:
-        """修正坐标、添加天气预警、补充开放时间"""
+    async def postprocess(self, state: PlannerState) -> dict:
+        """修正坐标、添加天气预警、补充开放时间（并发 AMap 调用）"""
         trip_plan: Optional[TripPlan] = state.get("trip_plan")
         if not trip_plan:
             return {"trip_plan": None, "error": state.get("error", "行程规划失败")}
 
         primary_city = state["primary_city"]
-        self._fix_coordinates(trip_plan, primary_city)
+        await asyncio.gather(
+            self._fix_coordinates_async(trip_plan, primary_city),
+            self._enrich_opening_hours_async(trip_plan, primary_city),
+        )
         self._add_weather_warnings(trip_plan)
-        self._enrich_opening_hours(trip_plan, primary_city)
         logger.success("✅ postprocess 节点完成")
         return {"trip_plan": trip_plan, "error": None}
 
@@ -198,8 +200,33 @@ class NodeFactory:
     # 后处理辅助方法
     # ──────────────────────────────────────────
 
+    async def _fix_coordinates_async(self, trip_plan: TripPlan, city: str) -> None:
+        """并发修正所有景点经纬度坐标"""
+        attractions = [
+            (attraction, day)
+            for day in trip_plan.days
+            for attraction in day.attractions
+            if attraction.address
+        ]
+        if not attractions:
+            return
+
+        tasks = [
+            self._amap_client.geocode_async(attr.address, city)
+            for attr, _ in attractions
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for (attraction, _), result in zip(attractions, results):
+            if isinstance(result, Exception):
+                logger.debug(f"坐标修正异常 [{attraction.name}]: {result}")
+            elif result:
+                lng, lat = result
+                attraction.location = Location(longitude=lng, latitude=lat)
+                logger.debug(f"✅ 坐标修正: {attraction.name} → {lng},{lat}")
+
     def _fix_coordinates(self, trip_plan: TripPlan, city: str) -> None:
-        """通过高德地理编码 API 修正所有景点经纬度坐标"""
+        """通过高德地理编码 API 修正所有景点经纬度坐标（同步，保留供测试使用）"""
         for day in trip_plan.days:
             for attraction in day.attractions:
                 if not attraction.address:
@@ -255,8 +282,31 @@ class NodeFactory:
                 weather.weather_warning = "；".join(warnings)
                 logger.warning(f"🚨 {weather.date} 天气预警: {weather.weather_warning}")
 
+    async def _enrich_opening_hours_async(self, trip_plan: TripPlan, city: str) -> None:
+        """并发获取所有景点真实开放时间"""
+        attractions = [
+            attraction
+            for day in trip_plan.days
+            for attraction in day.attractions
+        ]
+        if not attractions:
+            return
+
+        tasks = [
+            self._amap_client.get_opening_hours_async(attr.name, city)
+            for attr in attractions
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for attraction, result in zip(attractions, results):
+            if isinstance(result, Exception):
+                logger.debug(f"开放时间获取异常 [{attraction.name}]: {result}")
+            elif result:
+                attraction.opening_hours = result
+                logger.debug(f"🕐 {attraction.name} 开放时间: {result}")
+
     def _enrich_opening_hours(self, trip_plan: TripPlan, city: str) -> None:
-        """通过高德 Place Search API 获取景点真实开放时间"""
+        """通过高德 Place Search API 获取景点真实开放时间（同步，保留供测试使用）"""
         for day in trip_plan.days:
             for attraction in day.attractions:
                 opentime = self._amap_client.get_opening_hours(attraction.name, city)

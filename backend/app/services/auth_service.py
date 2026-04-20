@@ -1,10 +1,8 @@
 """
 功能18/23：用户认证服务
 - 密码散列：passlib + bcrypt
-- JWT：python-jose（HS256，默认 30 天有效期，供开发测试便利）
+- JWT：python-jose（HS256，有效期由 JWT_EXPIRE_DAYS 控制，默认 7 天）
 """
-import os
-import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -14,6 +12,7 @@ from passlib.hash import pbkdf2_sha256
 from sqlmodel import Session, select
 from loguru import logger
 
+from ..config import get_settings
 from ..models.db_models import User
 
 # ── 密码哈希 ──────────────────────────────────────────────────────────────
@@ -41,27 +40,25 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 # ── JWT 配置 ───────────────────────────────────────────────────────────────
-# 生产环境应从环境变量读取，这里提供合理默认值
-_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_hex(32))
 _ALGORITHM = "HS256"
-_ACCESS_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_EXPIRE_DAYS", "30"))
 
 
 def create_access_token(user_id: int, username: str) -> str:
     """生成 JWT access token"""
-    expire = datetime.utcnow() + timedelta(days=_ACCESS_TOKEN_EXPIRE_DAYS)
+    settings = get_settings()
+    expire = datetime.utcnow() + timedelta(days=settings.jwt_expire_days)
     payload = {
         "sub": str(user_id),
         "username": username,
         "exp": expire,
     }
-    return jwt.encode(payload, _SECRET_KEY, algorithm=_ALGORITHM)
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=_ALGORITHM)
 
 
 def decode_token(token: str) -> Optional[dict]:
     """解码 JWT，返回 payload 或 None（过期/无效）"""
     try:
-        return jwt.decode(token, _SECRET_KEY, algorithms=[_ALGORITHM])
+        return jwt.decode(token, get_settings().jwt_secret_key, algorithms=[_ALGORITHM])
     except JWTError:
         return None
 

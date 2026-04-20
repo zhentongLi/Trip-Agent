@@ -23,16 +23,89 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from typing import Optional
 
 from langchain_openai import ChatOpenAI
+from loguru import logger
 
 from .agents.planner import MultiAgentTripPlanner
 from .config import Settings, get_settings
 from .services.amap_rest_client import AmapRestClient
 from .services.cache_service import TTLCache
-from .services.circuit_breaker import CircuitBreaker
+from .services.circuit_breaker import CircuitBreaker, RedisCircuitBreaker
 from .services.share_service import ShareStore
 from .skills.router import SkillRouter
+
+try:
+    from redis import Redis
+except ImportError:
+    Redis = None  # type: ignore[assignment,misc]
+
+try:
+    from redis.asyncio import Redis as AsyncRedis
+    from redis.asyncio import ConnectionPool as AsyncConnectionPool
+except ImportError:
+    AsyncRedis = None  # type: ignore[assignment,misc]
+    AsyncConnectionPool = None  # type: ignore[assignment]
+
+# ──────────────────────────────────────────
+# Redis 客户端工厂（进程级单例，连接失败自动降级）
+# ──────────────────────────────────────────
+
+
+@lru_cache()
+def get_sync_redis() -> Optional["Redis"]:
+    """同步 Redis 客户端（进程级单例）。Redis 不可用时返回 None。"""
+    settings = get_settings()
+    if settings.redis_disable or not settings.redis_url:
+        return None
+    if Redis is None:
+        logger.warning("redis 包未安装，同步 Redis 客户端不可用")
+        return None
+    try:
+        client = Redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+            health_check_interval=30,
+        )
+        client.ping()
+        logger.info(f"✅ 同步 Redis 已连接 | url={settings.redis_url[:20]}...")
+        return client
+    except Exception as e:
+        logger.warning(f"同步 Redis 连接失败，降级为本地存储: {e}")
+        return None
+
+
+@lru_cache()
+def get_async_redis() -> Optional["AsyncRedis"]:
+    """异步 Redis 客户端（进程级单例）。Redis 不可用时返回 None。
+
+    注意：工厂本身是同步的（lru_cache 要求），连接在首次 await 时建立。
+    """
+    settings = get_settings()
+    if settings.redis_disable or not settings.redis_url:
+        return None
+    if AsyncRedis is None:
+        logger.warning("redis.asyncio 包未安装，异步 Redis 客户端不可用")
+        return None
+    try:
+        pool = AsyncConnectionPool.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+            health_check_interval=30,
+            max_connections=int(os.getenv("MEMORY_REDIS_MAX_CONNECTIONS", "20")),
+        )
+        client = AsyncRedis(connection_pool=pool)
+        logger.info(f"✅ 异步 Redis 已配置 | url={settings.redis_url[:20]}...")
+        return client
+    except Exception as e:
+        logger.warning(f"异步 Redis 初始化失败，降级为本地存储: {e}")
+        return None
+
 
 # ──────────────────────────────────────────
 # 底层基础设施
@@ -65,14 +138,29 @@ def get_llm() -> ChatOpenAI:
 
 @lru_cache()
 def get_amap_client() -> AmapRestClient:
-    """高德 REST 客户端（含熔断器，进程级单例）"""
+    """高德 REST 客户端（含熔断器，进程级单例）。
+
+    CIRCUIT_BREAKER_REDIS_ENABLED=true 且 Redis 可用时使用分布式熔断器；
+    否则使用进程内熔断器（默认行为）。
+    """
     settings = get_settings()
-    breaker = CircuitBreaker(
-        name="amap",
-        failure_threshold=5,
-        recovery_timeout=30.0,
-        half_open_max_calls=1,
-    )
+    sync_redis = get_sync_redis()
+    if settings.circuit_breaker_redis_enabled and sync_redis is not None:
+        breaker = RedisCircuitBreaker(
+            name="amap",
+            redis_client=sync_redis,
+            namespace=settings.redis_namespace,
+            failure_threshold=5,
+            recovery_timeout=30.0,
+            half_open_max_calls=1,
+        )
+    else:
+        breaker = CircuitBreaker(
+            name="amap",
+            failure_threshold=5,
+            recovery_timeout=30.0,
+            half_open_max_calls=1,
+        )
     return AmapRestClient(api_key=settings.amap_api_key, circuit_breaker=breaker)
 
 
@@ -92,14 +180,34 @@ def get_trip_planner() -> MultiAgentTripPlanner:
 
 @lru_cache()
 def get_trip_cache() -> TTLCache:
-    """行程 TTL 缓存（进程级单例，TTL=1小时）"""
-    return TTLCache(ttl_seconds=1 * 3600)
+    """行程缓存（进程级单例）。Redis 可用时返回 RedisCache，否则返回 TTLCache。
+
+    两者接口完全一致（get/set/aget/aset），调用方无需感知实现。
+    """
+    settings = get_settings()
+    fallback = TTLCache(ttl_seconds=settings.trip_cache_ttl_seconds)
+    async_redis = get_async_redis()
+    if async_redis is not None:
+        from .services.redis_cache import RedisCache
+        return RedisCache(  # type: ignore[return-value]
+            redis_client=async_redis,
+            namespace=settings.redis_namespace,
+            ttl_seconds=settings.trip_cache_ttl_seconds,
+            fallback=fallback,
+        )
+    return fallback
 
 
 @lru_cache()
 def get_share_store() -> ShareStore:
-    """行程分享存储（进程级单例）"""
-    return ShareStore()
+    """行程分享存储（进程级单例）。Redis 可用时持久化到 Redis；否则内存存储。"""
+    settings = get_settings()
+    async_redis = get_async_redis()
+    return ShareStore(
+        redis_client=async_redis,
+        namespace=settings.redis_namespace,
+        ttl_seconds=settings.share_ttl_seconds,
+    )
 
 
 # ──────────────────────────────────────────
@@ -116,3 +224,10 @@ def get_skill_router() -> SkillRouter:
     registry = SkillRegistry()
     registry.register(GuideQASkill())
     return SkillRouter(registry)
+
+
+def get_memory_service():
+    """MemoryService 单例，支持 dependency_overrides 覆盖。"""
+    from .services.memory_service import get_memory_service as _impl
+    from .services.memory_service import MemoryService  # noqa: F401 — for type hints
+    return _impl()
