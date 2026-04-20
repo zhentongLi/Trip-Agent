@@ -38,8 +38,9 @@ openai>=1.0.0
 chromadb>=0.5.23
 redis>=5.0.0
 
-# 限流
+# 限流（limits[redis] 为 SlowAPI 提供 Redis 存储后端）
 slowapi>=0.1.9
+limits[redis]>=3.7.0
 
 # 其他工具
 python-dateutil>=2.8.2

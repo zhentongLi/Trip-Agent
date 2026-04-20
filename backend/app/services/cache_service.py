@@ -35,6 +35,14 @@ class TTLCache:
         """写入缓存"""
         self._store[key] = {"data": value, "ts": time.time()}
 
+    async def aget(self, key: str) -> Optional[Any]:
+        """异步接口（供 RedisCache 降级时保持统一调用方式）"""
+        return self.get(key)
+
+    async def aset(self, key: str, value: Any) -> None:
+        """异步接口（供 RedisCache 降级时保持统一调用方式）"""
+        self.set(key, value)
+
     def delete(self, key: str) -> None:
         self._store.pop(key, None)
 

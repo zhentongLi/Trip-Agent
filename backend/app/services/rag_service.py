@@ -81,6 +81,57 @@ class GuideRAGService:
 
         _rerank_cache_ttl = int(os.getenv("RAG_RERANK_CACHE_TTL", str(24 * 3600)))
         self._rerank_cache: TTLCache = TTLCache(ttl_seconds=_rerank_cache_ttl)
+        self._rerank_redis: Optional[Any] = None
+        self._rerank_redis_ns: str = "trip_agent"
+        self._rerank_redis_ttl: int = _rerank_cache_ttl
+        self._init_rerank_redis()
+
+    def _init_rerank_redis(self) -> None:
+        """尝试连接 Redis 以持久化重排缓存；失败则静默降级。"""
+        settings = get_settings()
+        if settings.redis_disable or not settings.redis_url:
+            return
+        try:
+            from redis import Redis as _Redis
+            client = _Redis.from_url(
+                settings.redis_url,
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+            client.ping()
+            self._rerank_redis = client
+            self._rerank_redis_ns = settings.redis_namespace
+            self._rerank_redis_ttl = settings.rag_rerank_ttl_seconds
+            logger.info("✅ RAG 重排缓存已连接 Redis")
+        except Exception as e:
+            logger.warning(f"RAG rerank Redis 连接失败，使用本地缓存: {e}")
+
+    def _redis_rerank_get(self, key: str) -> Optional[Any]:
+        if self._rerank_redis is None:
+            return self._rerank_cache.get(key)
+        try:
+            raw = self._rerank_redis.get(f"{self._rerank_redis_ns}:rag:rerank:{key}")
+            if raw is None:
+                return self._rerank_cache.get(key)
+            return json.loads(raw)
+        except Exception as e:
+            logger.warning(f"redis_fallback domain=rag_rerank op=get err={e}")
+            return self._rerank_cache.get(key)
+
+    def _redis_rerank_set(self, key: str, value: Any) -> None:
+        self._rerank_cache.set(key, value)
+        if self._rerank_redis is None:
+            return
+        try:
+            raw = json.dumps(value, ensure_ascii=False, default=str)
+            redis_key = f"{self._rerank_redis_ns}:rag:rerank:{key}"
+            if self._rerank_redis_ttl > 0:
+                self._rerank_redis.setex(redis_key, self._rerank_redis_ttl, raw)
+            else:
+                self._rerank_redis.set(redis_key, raw)
+        except Exception as e:
+            logger.warning(f"redis_fallback domain=rag_rerank op=set err={e}")
 
     @staticmethod
     def _env_bool(name: str, default: bool) -> bool:
@@ -672,7 +723,7 @@ class GuideRAGService:
         # 优先 Cross-Encoder；不可用时退化为轻量重排（融合 lexical + 初始召回分）
         if self._enable_rerank and self._reranker is not None:
             cache_key = self._make_rerank_cache_key(query, candidates, top_k)
-            cached = self._rerank_cache.get(cache_key)
+            cached = self._redis_rerank_get(cache_key)
             if cached is not None:
                 logger.debug(f"Cross-Encoder 缓存命中: {cache_key}")
                 return cached
@@ -693,7 +744,7 @@ class GuideRAGService:
                     reverse=True,
                 )
                 result = reranked[:top_k]
-                self._rerank_cache.set(cache_key, result)
+                self._redis_rerank_set(cache_key, result)
                 return result
             except Exception as e:
                 logger.warning(f"Cross-Encoder 重排失败，降级为轻量重排: {e}")

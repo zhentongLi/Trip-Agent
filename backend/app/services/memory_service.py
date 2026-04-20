@@ -36,6 +36,22 @@ except Exception:
 
 from .llm_service import get_llm
 
+# Lua 原子脚本：将两条消息追加到 List，裁剪到最大长度，刷新 TTL
+# 消除并发写同一 session_id 时的 Read-Modify-Write 数据丢失问题
+_LUA_APPEND_MESSAGES = """
+local key = KEYS[1]
+redis.call('RPUSH', key, ARGV[1], ARGV[2])
+local len = redis.call('LLEN', key)
+local maxlen = tonumber(ARGV[3])
+if len > maxlen then
+  redis.call('LTRIM', key, len - maxlen, -1)
+end
+if tonumber(ARGV[4]) > 0 then
+  redis.call('EXPIRE', key, tonumber(ARGV[4]))
+end
+return redis.call('LLEN', key)
+"""
+
 
 class MemoryService:
     """Session memory + persisted profile memory."""
@@ -345,7 +361,7 @@ class MemoryService:
         client = await self._get_async_redis()
         if client:
             key = self._key("session", sid, "messages")
-            async with client.pipeline(transaction=False) as pipe:
+            async with client.pipeline(transaction=True) as pipe:
                 await pipe.delete(key)
                 if messages:
                     payload = [json.dumps(m, ensure_ascii=False) for m in messages]
@@ -618,10 +634,32 @@ class MemoryService:
     ) -> None:
         sid = (session_id or "default").strip() or "default"
 
-        msgs = await self._async_get_session_messages(sid)
-        msgs.append({"role": "user", "content": user_message})
-        msgs.append({"role": "assistant", "content": assistant_message})
-        await self._async_set_session_messages(sid, msgs)
+        # 原子追加：使用 Lua 脚本，消除并发写同一 session_id 时的 RMW 数据丢失
+        client = await self._get_async_redis()
+        if client:
+            key = self._key("session", sid, "messages")
+            _max_list_len = self._max_short_messages * 10  # 安全上限，压缩前最多保留 60 条
+            try:
+                await client.eval(
+                    _LUA_APPEND_MESSAGES,
+                    1,
+                    key,
+                    json.dumps({"role": "user", "content": user_message}, ensure_ascii=False),
+                    json.dumps({"role": "assistant", "content": assistant_message}, ensure_ascii=False),
+                    str(_max_list_len),
+                    str(self._session_ttl_seconds),
+                )
+            except Exception as e:
+                logger.warning(f"Redis Lua append 失败，降级为本地写入: {e}")
+                msgs = list(self._session_messages.get(sid, []))
+                msgs.append({"role": "user", "content": user_message})
+                msgs.append({"role": "assistant", "content": assistant_message})
+                self._session_messages[sid] = msgs
+        else:
+            msgs = list(self._session_messages.get(sid, []))
+            msgs.append({"role": "user", "content": user_message})
+            msgs.append({"role": "assistant", "content": assistant_message})
+            self._session_messages[sid] = msgs
 
         profile = await self._async_get_profile(sid)
 

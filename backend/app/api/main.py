@@ -127,6 +127,76 @@ async def health():
     }
 
 
+@app.get("/health/redis")
+async def health_redis():
+    """Redis 各服务可用性检查
+
+    返回各组件是否成功使用 Redis（而非本地降级）：
+    - memory: 会话记忆（MemoryService）
+    - trip_cache: 行程规划缓存（RedisCache）
+    - share_store: 分享链接存储（ShareStore）
+    - rate_limit: 分布式限流（SlowAPI + Redis）
+    - circuit_breaker: 分布式熔断器（RedisCircuitBreaker）
+    """
+    from ..dependencies import get_async_redis, get_trip_cache, get_share_store
+    from ..services.memory_service import get_memory_service
+    from ..services.redis_cache import RedisCache
+    from ..services.circuit_breaker import RedisCircuitBreaker
+
+    results: dict[str, str] = {}
+
+    # 1. 基础 Redis 连通性
+    async_redis = get_async_redis()
+    redis_up = False
+    if async_redis is not None:
+        try:
+            await async_redis.ping()
+            redis_up = True
+        except Exception:
+            redis_up = False
+
+    # 2. MemoryService
+    try:
+        mem = get_memory_service()
+        results["memory"] = "ok" if mem.using_redis else "local_fallback"
+    except Exception:
+        results["memory"] = "error"
+
+    # 3. TripCache
+    try:
+        cache = get_trip_cache()
+        results["trip_cache"] = "ok" if isinstance(cache, RedisCache) else "local_fallback"
+    except Exception:
+        results["trip_cache"] = "error"
+
+    # 4. ShareStore
+    try:
+        store = get_share_store()
+        results["share_store"] = "ok" if (store._redis is not None) else "local_fallback"
+    except Exception:
+        results["share_store"] = "error"
+
+    # 5. Rate limiting（通过 storage_uri 判断）
+    try:
+        from .rate_limit import limiter
+        uri = getattr(limiter, "_storage_uri", None) or ""
+        results["rate_limit"] = "ok" if uri.startswith("redis") else "local_fallback"
+    except Exception:
+        results["rate_limit"] = "error"
+
+    # 6. Circuit breaker
+    try:
+        from ..dependencies import get_amap_client
+        client = get_amap_client()
+        breaker = getattr(client, "_circuit_breaker", None)
+        results["circuit_breaker"] = "ok" if isinstance(breaker, RedisCircuitBreaker) else "local_fallback"
+    except Exception:
+        results["circuit_breaker"] = "error"
+
+    overall = "ok" if redis_up else "degraded"
+    return {"status": overall, "redis_reachable": redis_up, "services": results}
+
+
 if __name__ == "__main__":
     import uvicorn
     
