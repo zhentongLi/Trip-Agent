@@ -7,19 +7,28 @@ from typing import Any, Dict
 
 from loguru import logger
 
-from ..services.memory_service import get_memory_service
-from ..services.rag_service import get_guide_rag_service
 from .base import RuntimeSkill
 
-# GuideQASkill 封装了基于 RAG 的导游问答能力，继承自 RuntimeSkill。
+
 class GuideQASkill(RuntimeSkill):
-    """封装导游问答 RAG 能力。"""
+    """封装导游问答 RAG 能力。
 
-    # Skill 的名称和描述，供注册中心使用
+    通过构造函数注入 RAGService 和 MemoryService，
+    避免在运行时内部调用全局单例，提升可测试性与解耦程度。
+    """
+
     name = "guide_qa"
-    description = "基于 RAG 的导游问答能力"
+    description = "基于 RAG 的导游问答能力，检索本地旅游知识库并结合 LLM 生成景点导览回答"
 
-    # async 版本的 run 方法，内部调用同步的 RAGService.ask 方法
+    def __init__(self, rag_service: Any, memory_service: Any) -> None:
+        """
+        Args:
+            rag_service:    GuideRAGService 实例（提供 ask 方法）。
+            memory_service: MemoryService 实例（提供 async_build_context / async_record_turn）。
+        """
+        self._rag = rag_service
+        self._memory = memory_service
+
     async def run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         question = str(payload.get("question", "")).strip()
         if not question:
@@ -41,15 +50,11 @@ class GuideQASkill(RuntimeSkill):
             top_k,
         )
 
-        """
-            获取 RAGService 实例，并调用 ask 方法获取答案和参考文献,使用 asyncio.to_thread 将同步方法包装成异步调用，避免在 RAGService 内部引入异步复杂度，并且 RAGService 内部可能有同步的 ChromaDB 调用
-        """
-        service = get_guide_rag_service()
-        memory = get_memory_service()
-        memory_context = await memory.async_build_context(session_id)
+        memory_context = await self._memory.async_build_context(session_id)
 
+        # RAGService 内部有同步 ChromaDB 调用，用 asyncio.to_thread 避免阻塞事件循环
         result = await asyncio.to_thread(
-            service.ask,
+            self._rag.ask,
             question,
             city,
             attraction_name,
@@ -65,7 +70,7 @@ class GuideQASkill(RuntimeSkill):
             "debug": debug,
         }
 
-        await memory.async_record_turn(
+        await self._memory.async_record_turn(
             session_id=session_id,
             user_message=question,
             assistant_message=result.get("answer", ""),

@@ -266,3 +266,43 @@ class AmapRestClient:
         except Exception as e:
             logger.debug(f"异步获取开放时间失败 [{name}]: {e}")
         return None
+
+    # ─────────────────────────────────────────────
+    # 公开：结构化 POI 搜索（返回字典列表）
+    # ─────────────────────────────────────────────
+
+    async def search_places_structured_async(
+        self, keywords: str, city: str, limit: int = 10
+    ) -> list[dict]:
+        """异步 POI 搜索，返回结构化字典列表（供 Skill 使用）。
+
+        每个字典包含：id, name, type, address, location (dict), tel, rating。
+        """
+        try:
+            data = await self._get_async(
+                "/v3/place/text",
+                {"keywords": keywords, "city": city, "output": "json"},
+            )
+            if data.get("status") == "1" and data.get("pois"):
+                pois = data["pois"][:limit]
+                result = []
+                for poi in pois:
+                    loc_str = poi.get("location", "0,0")
+                    try:
+                        lng, lat = loc_str.split(",")
+                    except ValueError:
+                        lng, lat = "0", "0"
+                    biz = poi.get("biz_ext") or {}
+                    result.append({
+                        "id": poi.get("id", ""),
+                        "name": poi.get("name", ""),
+                        "type": poi.get("type", ""),
+                        "address": poi.get("address", ""),
+                        "location": {"longitude": float(lng), "latitude": float(lat)},
+                        "tel": poi.get("tel") or None,
+                        "rating": biz.get("rating") or None,
+                    })
+                return result
+        except Exception as e:
+            logger.warning(f"⚠️ search_places_structured_async 失败 [{keywords}/{city}]: {e}")
+        return []
