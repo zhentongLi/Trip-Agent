@@ -56,7 +56,8 @@ app/
 │   │                    #   Uses Redis storage_uri when REDIS_URL is set
 │   └── routes/          # All route handlers use Depends() — no direct singleton calls
 │       ├── trip.py      # /api/trip/* — injects MultiAgentTripPlanner + cache
-│       ├── guide.py     # /api/guide/ask — injects SkillRouter
+│       ├── guide.py     # /api/guide/ask + /api/guide/skill/{poi,adjust} + GET /api/skills
+│       │                #   All dispatch through SkillRouter — uniform error handling
 │       ├── share.py     # Share link management — uses Depends(get_share_store) + async methods
 │       ├── auth.py      # JWT auth
 │       ├── user.py      # Cloud trip CRUD
@@ -76,6 +77,7 @@ app/
 │                        #   get_amap_client — selects CircuitBreaker or RedisCircuitBreaker
 ├── errors/
 │   ├── types.py         # Exception hierarchy: AppError → ExternalServiceError → CircuitOpenError
+│   │                    #   + SkillExecutionError / SkillNotFoundError (raised by SkillRouter)
 │   ├── schemas.py       # ErrorResponse Pydantic model
 │   └── handlers.py      # register_error_handlers(app) — called once in main.py
 ├── services/
@@ -93,11 +95,14 @@ app/
 │   │                        #   Rerank results cached in Redis (24h TTL) via _redis_rerank_get/set
 │   ├── llm_service.py       # get_llm() — kept for legacy; prefer dependencies.py
 │   └── pdf_service.py       # ReportLab PDF generation
-├── skills/
-│   ├── base.py          # RuntimeSkill ABC
-│   ├── registry.py      # SkillRegistry
-│   ├── router.py        # SkillRouter.dispatch(name, payload)
-│   └── guide_qa_skill.py
+├── skills/              # Pluggable skill architecture (strategy + registry pattern)
+│   ├── base.py          # RuntimeSkill ABC — name, description, run(), metadata()
+│   ├── registry.py      # SkillRegistry — register / get / list_names / list_skills
+│   ├── router.py        # SkillRouter.dispatch() — wraps exceptions as SkillExecutionError
+│   │                    #                          raises SkillNotFoundError for unknown names
+│   ├── guide_qa_skill.py    # GuideQASkill — constructor-injected rag + memory services
+│   ├── poi_recommend_skill.py  # POIRecommendSkill — wraps AmapRestClient structured POI search
+│   └── trip_adjust_skill.py    # TripAdjustSkill — wraps planner.adjust_trip via skill entry
 ├── models/
 │   ├── schemas.py       # Pydantic v2: TripRequest, TripPlan, DayPlan, Attraction, Meal, …
 │   └── db_models.py     # SQLModel: User, SavedTrip (SQLite)
@@ -186,6 +191,21 @@ app.dependency_overrides.pop(get_trip_cache, None)
 
 The `client_with_mock_planner` fixture in `conftest.py` handles this automatically.
 
+### Skills System
+
+Pluggable capability layer built on the **strategy + registry** pattern — frontend discovers skills dynamically via `GET /api/skills`, invokes them through dedicated routes.
+
+**Adding a new skill:**
+
+1. Subclass `RuntimeSkill` in `backend/app/skills/`, set class-level `name` + `description`, implement `async run(payload) -> dict`.
+2. **Inject dependencies via constructor** — do NOT call `get_xxx()` globals inside `run()`. This keeps skills testable and preserves the DI contract.
+3. Register in `dependencies.py::get_skill_router()`: `registry.register(MySkill(dep=get_some_dep()))`.
+4. (Optional) Add a thin route in `guide.py` that validates request schema and dispatches via `skill_router.dispatch("my_skill", payload)`.
+
+**Error contract:** `SkillRouter.dispatch()` catches all exceptions from `skill.run()` and wraps them as `SkillExecutionError` (HTTP 500). Missing skills raise `SkillNotFoundError` (HTTP 404). Both are `AppError` subclasses, so `register_error_handlers()` converts them to typed JSON automatically.
+
+**Currently registered skills:** `guide_qa` (RAG Q&A), `poi_recommend` (AMap POI search), `trip_adjust` (natural-language itinerary editing).
+
 ### Error Handling
 
 `register_error_handlers(app)` installs handlers for:
@@ -200,7 +220,7 @@ Raise `AppError` subclasses from business logic; avoid `HTTPException` inside se
 Import `limiter` from `app.api.rate_limit` (not `main.py` — circular import).  
 Apply `@limiter.limit("N/minute")` **above** `@router.post(...)`. Handler's first param must be `request: Request`.
 
-Current limits: `/plan/stream` & `/plan` → 5/min · `/adjust` → 10/min · `/guide/ask` → 20/min
+Current limits: `/plan/stream` & `/plan` → 5/min · `/adjust` → 10/min · `/guide/ask` & `/guide/skill/poi` → 20/min · `/guide/skill/adjust` → 10/min
 
 When `REDIS_URL` is set, SlowAPI uses Redis as the counter store (distributed, shared across instances). Falls back to `memory://` when unset.
 
