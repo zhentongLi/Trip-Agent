@@ -273,3 +273,65 @@ class ErrorResponse(BaseModel):
     message: str = Field(..., description="错误消息")
     error_code: Optional[str] = Field(default=None, description="错误代码")
 
+
+# ============ Skills 发现接口 ============
+
+class SkillInfo(BaseModel):
+    """Skill 元数据（供 GET /api/skills 发现接口使用）"""
+    name: str = Field(..., description="Skill 唯一标识符")
+    description: str = Field(..., description="Skill 功能描述")
+
+
+class SkillListResponse(BaseModel):
+    """Skill 列表响应"""
+    success: bool = Field(default=True)
+    skills: List[SkillInfo] = Field(default=[], description="已注册 Skill 列表")
+    total: int = Field(default=0, description="Skill 总数")
+
+
+# ============ POI 推荐 Skill 请求/响应 ============
+
+class POIRecommendRequest(BaseModel):
+    """POI 推荐 Skill 请求（通过 /guide/ask?skill=poi_recommend 触发）"""
+    city: str = Field(..., description="目标城市", example="成都")
+    keywords: str = Field(default="", description="搜索关键词，如：火锅、故宫", example="火锅")
+    category: str = Field(default="", description="类别提示：景点/餐厅/酒店/购物/娱乐", example="餐厅")
+    limit: int = Field(default=8, ge=1, le=20, description="返回数量（最大20）")
+
+
+class POIRecommendPlace(BaseModel):
+    """单个 POI 推荐结果"""
+    id: str = Field(default="", description="POI ID")
+    name: str = Field(..., description="地点名称")
+    type: str = Field(default="", description="POI 类型")
+    address: str = Field(default="", description="地址")
+    location: Location = Field(..., description="经纬度坐标")
+    tel: Optional[str] = Field(default=None, description="电话")
+    rating: Optional[str] = Field(default=None, description="评分")
+
+
+class POIRecommendResponse(BaseModel):
+    """POI 推荐 Skill 响应"""
+    success: bool = Field(default=True)
+    city: str = Field(default="", description="搜索城市")
+    keywords: str = Field(default="", description="搜索关键词")
+    total: int = Field(default=0, description="结果数量")
+    places: List[POIRecommendPlace] = Field(default=[], description="地点列表")
+    message: str = Field(default="")
+
+
+# ============ 行程调整 Skill 请求/响应 ============
+
+class TripAdjustSkillRequest(BaseModel):
+    """TripAdjustSkill 请求（通过 /guide/skill/trip_adjust 触发）"""
+    user_message: str = Field(..., description="自然语言调整要求", example="把第二天的故宫换成颐和园", max_length=500)
+    trip_plan: TripPlan = Field(..., description="当前行程")
+    city: str = Field(default="", description="主城市（可选，用于坐标修正）")
+
+
+class TripAdjustSkillResponse(BaseModel):
+    """TripAdjustSkill 响应"""
+    success: bool = Field(default=True)
+    adjusted_plan: Optional[TripPlan] = Field(default=None, description="调整后的行程")
+    message: str = Field(default="")
+

@@ -217,12 +217,27 @@ def get_share_store() -> ShareStore:
 
 @lru_cache()
 def get_skill_router() -> SkillRouter:
-    """Skill 路由器（含 GuideQASkill，进程级单例）"""
+    """Skill 路由器（含全部已注册 Skill，进程级单例）。
+
+    已注册 Skill（按 name 字母序）：
+      - guide_qa      : GuideQASkill  — RAG 导游问答
+      - poi_recommend : POIRecommendSkill — 高德 POI 推荐
+      - trip_adjust   : TripAdjustSkill  — 自然语言行程调整
+    """
+    from .services.rag_service import get_guide_rag_service
+    from .services.memory_service import get_memory_service as _get_memory
     from .skills.guide_qa_skill import GuideQASkill
+    from .skills.poi_recommend_skill import POIRecommendSkill
+    from .skills.trip_adjust_skill import TripAdjustSkill
     from .skills.registry import SkillRegistry
 
     registry = SkillRegistry()
-    registry.register(GuideQASkill())
+    registry.register(GuideQASkill(
+        rag_service=get_guide_rag_service(),
+        memory_service=_get_memory(),
+    ))
+    registry.register(POIRecommendSkill(amap_client=get_amap_client()))
+    registry.register(TripAdjustSkill(planner=get_trip_planner()))
     return SkillRouter(registry)
 
 

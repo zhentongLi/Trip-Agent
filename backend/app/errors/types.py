@@ -82,3 +82,35 @@ class RateLimitError(AppError):
 
     def __init__(self, message: str = "请求过于频繁，请稍后重试") -> None:
         super().__init__(message, status_code=429, error_code="RATE_LIMIT_EXCEEDED")
+
+
+class SkillExecutionError(AppError):
+    """Skill 执行失败（SkillRouter 统一捕获并包装）"""
+
+    def __init__(
+        self,
+        skill_name: str,
+        message: str,
+        original_error: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message=f"Skill '{skill_name}' 执行失败: {message}",
+            status_code=500,
+            error_code="SKILL_EXECUTION_ERROR",
+            details={"skill_name": skill_name},
+        )
+        self.skill_name = skill_name
+        self.original_error = original_error
+
+
+class SkillNotFoundError(AppError):
+    """请求的 Skill 不存在"""
+
+    def __init__(self, skill_name: str) -> None:
+        super().__init__(
+            message=f"未找到 Skill: '{skill_name}'",
+            status_code=404,
+            error_code="SKILL_NOT_FOUND",
+            details={"skill_name": skill_name},
+        )
+        self.skill_name = skill_name

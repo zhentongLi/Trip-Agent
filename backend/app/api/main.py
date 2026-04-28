@@ -10,6 +10,7 @@ from .rate_limit import limiter
 from loguru import logger
 from ..config import get_settings, validate_config, print_config
 from .routes import trip, poi, map as map_routes, share, auth, user, guide
+from .routes.guide import skill_discovery_router
 from ..models.db_models import create_db_tables
 from ..errors import register_error_handlers
 
@@ -69,6 +70,7 @@ app.include_router(share.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")   # 功能18：/api/auth/*
 app.include_router(user.router, prefix="/api")   # 功能23：/api/user/*
 app.include_router(guide.router, prefix="/api")  # 功能27：/api/guide/*
+app.include_router(skill_discovery_router, prefix="/api")  # GET /api/skills
 
 
 @app.on_event("startup")

@@ -9,6 +9,8 @@ from .types import (
     NotFoundError,
     AuthenticationError,
     RateLimitError,
+    SkillExecutionError,
+    SkillNotFoundError,
 )
 from .schemas import ErrorResponse
 from .handlers import register_error_handlers
@@ -22,6 +24,8 @@ __all__ = [
     "NotFoundError",
     "AuthenticationError",
     "RateLimitError",
+    "SkillExecutionError",
+    "SkillNotFoundError",
     "ErrorResponse",
     "register_error_handlers",
 ]
