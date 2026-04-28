@@ -3,6 +3,12 @@
 
 Redis 可用时：Hash 持久化，重启不丢失，多实例共享。
 Redis 不可用时：降级为内存 KV（原行为），TTL 7天。
+
+字段说明（Redis Hash / 本地 dict）：
+  plan        - JSON 字符串（TripPlan）
+  title       - 分享标题
+  ts          - 创建时间戳（float）
+  creator_id  - 创建者用户 ID（str(int) 或 ""，旧数据缺失则视为 None）
 """
 
 import json
@@ -34,9 +40,10 @@ class ShareStore:
     # 异步接口（Redis 路径）
     # ──────────────────────────────────────────
 
-    async def acreate(self, plan_data: dict, title: str = "") -> str:
-        """存储行程，返回 8 位 share_id。"""
+    async def acreate(self, plan_data: dict, title: str = "", creator_id: Optional[int] = None) -> str:
+        """存储行程，返回 8 位 share_id。creator_id 为 None 时表示匿名分享。"""
         share_id = self._generate_id()
+        creator_str = str(creator_id) if creator_id is not None else ""
         if self._redis:
             try:
                 key = self._redis_key(share_id)
@@ -44,31 +51,39 @@ class ShareStore:
                     "plan": json.dumps(plan_data, ensure_ascii=False),
                     "title": title,
                     "ts": str(time.time()),
+                    "creator_id": creator_str,
                 })
                 if self._ttl > 0:
                     await self._redis.expire(key, self._ttl)
-                logger.info(f"📤 行程分享已创建(Redis): {share_id}")
+                logger.info(f"📤 行程分享已创建(Redis): {share_id} creator={creator_id}")
                 return share_id
             except Exception as e:
                 logger.warning(f"redis_fallback domain=share op=acreate err={e}")
         # 本地降级
         self._evict_expired()
-        self._local[share_id] = {"plan": plan_data, "title": title, "ts": time.time()}
-        logger.info(f"📤 行程分享已创建(本地): {share_id} (共 {len(self._local)} 条)")
+        self._local[share_id] = {
+            "plan": plan_data,
+            "title": title,
+            "ts": time.time(),
+            "creator_id": creator_id,
+        }
+        logger.info(f"📤 行程分享已创建(本地): {share_id} creator={creator_id} (共 {len(self._local)} 条)")
         return share_id
 
     async def aget(self, share_id: str) -> Optional[dict]:
-        """获取分享行程，过期/不存在则返回 None。"""
+        """获取分享行程，过期/不存在则返回 None。返回 dict 含 creator_id（可能为 None）。"""
         if self._redis:
             try:
                 key = self._redis_key(share_id)
                 raw = await self._redis.hgetall(key)
                 if not raw:
                     return None
+                raw_creator = raw.get("creator_id", "")
                 return {
                     "plan": json.loads(raw["plan"]),
                     "title": raw.get("title", ""),
                     "ts": float(raw.get("ts", 0)),
+                    "creator_id": int(raw_creator) if raw_creator else None,
                 }
             except Exception as e:
                 logger.warning(f"redis_fallback domain=share op=aget err={e}")
@@ -80,6 +95,17 @@ class ShareStore:
             self._local.pop(share_id, None)
             return None
         return item
+
+    async def acheck_owner(self, share_id: str, user_id: int) -> bool:
+        """检查 user_id 是否是 share_id 的创建者。
+        - 记录不存在 → False
+        - creator_id 为 None（匿名分享或旧数据）→ False（保守拒绝）
+        - creator_id == user_id → True
+        """
+        record = await self.aget(share_id)
+        if not record:
+            return False
+        return record.get("creator_id") == user_id
 
     async def adelete(self, share_id: str) -> bool:
         """删除分享链接，返回是否存在。"""
@@ -95,10 +121,15 @@ class ShareStore:
     # 同步接口（向后兼容，仅操作本地）
     # ──────────────────────────────────────────
 
-    def create(self, plan_data: dict, title: str = "") -> str:
+    def create(self, plan_data: dict, title: str = "", creator_id: Optional[int] = None) -> str:
         self._evict_expired()
         share_id = self._generate_id()
-        self._local[share_id] = {"plan": plan_data, "title": title, "ts": time.time()}
+        self._local[share_id] = {
+            "plan": plan_data,
+            "title": title,
+            "ts": time.time(),
+            "creator_id": creator_id,
+        }
         logger.info(f"📤 行程分享已创建: {share_id} (共 {len(self._local)} 条)")
         return share_id
 

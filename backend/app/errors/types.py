@@ -77,6 +77,13 @@ class AuthenticationError(AppError):
         super().__init__(message, status_code=401, error_code="AUTHENTICATION_ERROR")
 
 
+class AuthorizationError(AppError):
+    """操作被拒绝（非所有者或权限不足）"""
+
+    def __init__(self, message: str = "无权执行此操作") -> None:
+        super().__init__(message, status_code=403, error_code="FORBIDDEN")
+
+
 class RateLimitError(AppError):
     """自定义限流（用于流式接口内部限流检测）"""
 

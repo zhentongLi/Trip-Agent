@@ -25,6 +25,7 @@ import os
 from functools import lru_cache
 from typing import Optional
 
+from fastapi import Header
 from langchain_openai import ChatOpenAI
 from loguru import logger
 
@@ -246,3 +247,48 @@ def get_memory_service():
     from .services.memory_service import get_memory_service as _impl
     from .services.memory_service import MemoryService  # noqa: F401 — for type hints
     return _impl()
+
+
+# ──────────────────────────────────────────
+# 认证依赖工厂（统一来源，取代各路由文件中的局部实现）
+# ──────────────────────────────────────────
+
+
+def _parse_bearer(authorization: Optional[str]) -> Optional[str]:
+    """从 Authorization 头提取 Bearer token，无效时返回 None。"""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    return authorization[7:]
+
+
+def get_current_user_id(authorization: Optional[str] = Header(default=None)) -> int:
+    """强制鉴权依赖：无 token 或 token 无效时抛 AuthenticationError（HTTP 401）。
+
+    用法：
+        user_id: int = Depends(get_current_user_id)
+    """
+    from .services.auth_service import decode_token
+    from .errors.types import AuthenticationError
+
+    token = _parse_bearer(authorization)
+    if not token:
+        raise AuthenticationError("未提供认证令牌")
+    payload = decode_token(token)
+    if not payload:
+        raise AuthenticationError("令牌无效或已过期")
+    return int(payload["sub"])
+
+
+def get_optional_user_id(authorization: Optional[str] = Header(default=None)) -> Optional[int]:
+    """可选鉴权依赖：无 token 或无效 token 均返回 None，不抛错。
+
+    用法：
+        user_id: int | None = Depends(get_optional_user_id)
+    """
+    from .services.auth_service import decode_token
+
+    token = _parse_bearer(authorization)
+    if not token:
+        return None
+    payload = decode_token(token)
+    return int(payload["sub"]) if payload else None

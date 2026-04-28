@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cd backend
 
-# Run all tests (31 test cases)
+# Run all tests (50 test cases)
 /opt/anaconda3/envs/trip-agent/bin/python -m pytest tests/ -q
 # or with conda:
 conda run -n trip-agent python -m pytest tests/ -q
@@ -137,8 +137,10 @@ All services are provided through `app/dependencies.py`. Routes **must not** cal
 # CORRECT
 async def my_route(
     agent: MultiAgentTripPlanner = Depends(get_trip_planner),
-    cache = Depends(get_trip_cache),       # returns RedisCache or TTLCache
+    cache = Depends(get_trip_cache),            # returns RedisCache or TTLCache
     store: ShareStore = Depends(get_share_store),
+    user_id: int = Depends(get_current_user_id),      # forced auth (401 if missing)
+    user_id: int | None = Depends(get_optional_user_id),  # optional auth (None if missing)
 ): ...
 
 # WRONG
@@ -146,6 +148,32 @@ agent = get_trip_planner_agent()   # deprecated shim, raises RuntimeError
 ```
 
 All factories use `@lru_cache()` for process-level singletons. Override in tests via `app.dependency_overrides`.
+
+### Authentication
+
+Two auth dependency factories are provided in `app/dependencies.py`:
+
+| Factory | Behavior | Use case |
+|---|---|---|
+| `get_current_user_id` | Raises `AuthenticationError` (401) if no/invalid token | Protected endpoints |
+| `get_optional_user_id` | Returns `None` if no/invalid token | Optional auth (anonymous allowed) |
+
+**Route authentication matrix:**
+
+| Route | Auth | Notes |
+|---|---|---|
+| `GET /auth/me`, all `/user/trips/*` | Required | `get_current_user_id` |
+| `DELETE /trip/cache`, `GET /trip/cache/stats` | Required | Internal admin ops |
+| `DELETE /trip/share/{id}` | Required + ownership | `acheck_owner` verifies creator_id |
+| `/trip/plan`, `/trip/plan/stream`, `/trip/adjust` | Optional | Anonymous users allowed |
+| `/guide/ask`, `/guide/skill/*` | Optional | Anonymous users allowed |
+| `GET /trip/share/{id}`, `POST /trip/share` | Anonymous | POST records creator_id if logged in |
+
+**Error types** (in `app/errors/types.py`):
+- `AuthenticationError` → HTTP 401, `error_code="AUTHENTICATION_ERROR"`
+- `AuthorizationError` → HTTP 403, `error_code="FORBIDDEN"`
+
+**Share ownership**: `ShareStore.acreate()` accepts `creator_id: int | None`. `acheck_owner(share_id, user_id)` returns False for anonymous shares (creator_id=None) — old shares without creator cannot be deleted (expire naturally after 7 days).
 
 ### Redis Integration
 

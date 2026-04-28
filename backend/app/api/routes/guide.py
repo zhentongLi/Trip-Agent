@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 
 from ...api.rate_limit import limiter
-from ...dependencies import get_skill_router
+from ...dependencies import get_skill_router, get_optional_user_id
 from ...errors import SkillExecutionError, SkillNotFoundError
 from ...models.schemas import (
     GuideAskRequest,
@@ -68,6 +68,7 @@ async def ask_guide(
     request: Request,
     body: GuideAskRequest,
     skill_router: SkillRouter = Depends(get_skill_router),
+    user_id: int | None = Depends(get_optional_user_id),
 ):
     question = body.question.strip()
     if not question:
@@ -140,6 +141,7 @@ async def recommend_poi(
     request: Request,
     body: POIRecommendRequest,
     skill_router: SkillRouter = Depends(get_skill_router),
+    user_id: int | None = Depends(get_optional_user_id),
 ):
     try:
         logger.info(f"📍 POI 推荐请求: city={body.city} | keywords={body.keywords or body.category}")
@@ -186,6 +188,7 @@ async def adjust_trip_skill(
     request: Request,
     body: TripAdjustSkillRequest,
     skill_router: SkillRouter = Depends(get_skill_router),
+    user_id: int | None = Depends(get_optional_user_id),
 ):
     try:
         logger.info(f"✏️ 行程调整 Skill 请求: {body.user_message[:60]}")
