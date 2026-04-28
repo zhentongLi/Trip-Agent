@@ -1,6 +1,6 @@
 """
 测试：API 路由（集成测试）
-涵盖 health / trip/share / trip/adjust 端点
+涵盖 health / trip/share / trip/adjust / 缓存管理鉴权 端点
 使用 httpx.AsyncClient + ASGITransport（不依赖真实 LLM）
 """
 import json
@@ -9,6 +9,7 @@ import pytest_asyncio
 
 from httpx import AsyncClient, ASGITransport
 from app.api.main import app
+from app.dependencies import get_current_user_id
 from tests.conftest import SAMPLE_TRIP_PLAN
 
 
@@ -66,18 +67,14 @@ class TestShareRoutes:
         resp = await client.get("/api/trip/share/XXXXXXXX")
         assert resp.status_code == 404
 
-    async def test_delete_share(self, client):
+    async def test_delete_share_without_token_returns_401(self, client):
+        """DELETE 分享链接需要 token（鉴权改造后匿名删除应返回 401）"""
         payload = {"plan": SAMPLE_TRIP_PLAN}
         resp = await client.post("/api/trip/share", json=payload)
         share_id = resp.json()["share_id"]
 
         del_resp = await client.delete(f"/api/trip/share/{share_id}")
-        assert del_resp.status_code == 200
-        assert del_resp.json()["success"] is True
-
-        # 删完再 GET → 404
-        get_resp = await client.get(f"/api/trip/share/{share_id}")
-        assert get_resp.status_code == 404
+        assert del_resp.status_code == 401
 
 
 # ─── AI 行程调整 (/api/trip/adjust) ─────────────────────────────────────────
@@ -113,3 +110,43 @@ class TestTripAdjust:
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
+
+
+# ─── 缓存管理鉴权 (/api/trip/cache) ─────────────────────────────────────────
+
+class TestCacheAuth:
+    async def test_cache_stats_no_token_returns_401(self, client):
+        resp = await client.get("/api/trip/cache/stats")
+        assert resp.status_code == 401
+
+    async def test_cache_delete_no_token_returns_401(self, client):
+        resp = await client.delete("/api/trip/cache")
+        assert resp.status_code == 401
+
+    async def test_cache_stats_with_token_returns_200(self, client):
+        app.dependency_overrides[get_current_user_id] = lambda: 1
+        try:
+            resp = await client.get("/api/trip/cache/stats")
+            assert resp.status_code == 200
+            assert resp.json()["success"] is True
+        finally:
+            app.dependency_overrides.pop(get_current_user_id, None)
+
+    async def test_cache_delete_with_token_returns_200(self, client):
+        app.dependency_overrides[get_current_user_id] = lambda: 1
+        try:
+            resp = await client.delete("/api/trip/cache")
+            assert resp.status_code == 200
+            assert resp.json()["success"] is True
+        finally:
+            app.dependency_overrides.pop(get_current_user_id, None)
+
+    async def test_plan_anonymous_still_works(self, client_with_mock_planner):
+        """不传 token 的规划请求应该仍然正常响应（可选鉴权）"""
+        payload = {
+            "trip_plan": SAMPLE_TRIP_PLAN,
+            "user_message": "把第一天景点换成颐和园",
+            "city": "北京",
+        }
+        resp = await client_with_mock_planner.post("/api/trip/adjust", json=payload)
+        assert resp.status_code == 200

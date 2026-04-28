@@ -8,7 +8,7 @@ from loguru import logger
 
 from ...api.rate_limit import limiter
 from ...agents.planner import MultiAgentTripPlanner
-from ...dependencies import get_trip_planner, get_trip_cache
+from ...dependencies import get_trip_planner, get_trip_cache, get_current_user_id, get_optional_user_id
 from ...models.schemas import TripRequest, TripPlan, TripPlanResponse, TripAdjustRequest
 from ...services.cache_service import TTLCache
 from ...services.pdf_service import generate_trip_pdf
@@ -29,6 +29,7 @@ async def plan_trip_stream(
     request_body: TripRequest,
     agent: MultiAgentTripPlanner = Depends(get_trip_planner),
     cache: TTLCache = Depends(get_trip_cache),
+    user_id: int | None = Depends(get_optional_user_id),
 ):
     """SSE 流式旅行规划接口"""
 
@@ -69,6 +70,7 @@ async def plan_trip(
     request_body: TripRequest,
     agent: MultiAgentTripPlanner = Depends(get_trip_planner),
     cache: TTLCache = Depends(get_trip_cache),
+    user_id: int | None = Depends(get_optional_user_id),
 ):
     """生成旅行计划（非流式）"""
     try:
@@ -110,6 +112,7 @@ async def adjust_trip(
     request: Request,
     body: TripAdjustRequest,
     agent: MultiAgentTripPlanner = Depends(get_trip_planner),
+    user_id: int | None = Depends(get_optional_user_id),
 ):
     """AI 行程调整对话"""
     if not body.user_message.strip():
@@ -158,12 +161,18 @@ async def export_trip_pdf(plan: TripPlan):
 # ===================== 缓存管理 =====================
 
 @router.get("/cache/stats", summary="查看缓存统计")
-async def get_cache_stats(cache: TTLCache = Depends(get_trip_cache)):
+async def get_cache_stats(
+    cache: TTLCache = Depends(get_trip_cache),
+    _: int = Depends(get_current_user_id),
+):
     return {"success": True, "data": cache.stats()}
 
 
 @router.delete("/cache", summary="清空缓存")
-async def clear_cache(cache: TTLCache = Depends(get_trip_cache)):
+async def clear_cache(
+    cache: TTLCache = Depends(get_trip_cache),
+    _: int = Depends(get_current_user_id),
+):
     cache.clear()
     return {"success": True, "message": "缓存已清空"}
 
