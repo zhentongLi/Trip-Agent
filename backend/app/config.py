@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     )
     redis_disable: bool = Field(default=False, alias="REDIS_DISABLE")
 
+    # Planner 上下文压缩（默认启用，可通过 PLANNER_COMPRESS_CONTEXT=false 关闭）
+    planner_compress_context: bool = Field(default=True, alias="PLANNER_COMPRESS_CONTEXT")
+
     model_config = ConfigDict(
         env_file=".env",
         case_sensitive=False,

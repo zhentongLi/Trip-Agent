@@ -173,9 +173,11 @@ def get_amap_client() -> AmapRestClient:
 @lru_cache()
 def get_trip_planner() -> MultiAgentTripPlanner:
     """多智能体行程规划器（进程级单例）"""
+    from .services.memory_service import get_memory_service as _get_memory
     return MultiAgentTripPlanner(
         llm=get_llm(),
         amap_client=get_amap_client(),
+        memory_service=_get_memory(),
     )
 
 
