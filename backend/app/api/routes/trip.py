@@ -32,10 +32,15 @@ async def plan_trip_stream(
     user_id: int | None = Depends(get_optional_user_id),
 ):
     """SSE 流式旅行规划接口"""
+    # 推导 session_id：登录用户用稳定 ID，匿名用户从请求头读取（可选）
+    if user_id:
+        session_id = f"user_{user_id}"
+    else:
+        session_id = request.headers.get("X-Session-ID") or None
 
     async def event_generator():
         try:
-            async for event in agent.plan_trip_stream(request_body, cache=cache):
+            async for event in agent.plan_trip_stream(request_body, cache=cache, session_id=session_id):
                 payload = json.dumps(event, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
         except Exception as e:
@@ -73,11 +78,17 @@ async def plan_trip(
     user_id: int | None = Depends(get_optional_user_id),
 ):
     """生成旅行计划（非流式）"""
+    # 推导 session_id：登录用户用稳定 ID，匿名用户从请求头读取（可选）
+    if user_id:
+        session_id = f"user_{user_id}"
+    else:
+        session_id = request.headers.get("X-Session-ID") or None
+
     try:
         logger.info(f"📥 旅行规划请求: {request_body.city} {request_body.start_date}~{request_body.end_date}")
 
         trip_plan_data = None
-        async for event in agent.plan_trip_stream(request_body, cache=cache):
+        async for event in agent.plan_trip_stream(request_body, cache=cache, session_id=session_id):
             if event.get("type") == "done":
                 trip_plan_data = event["data"]
             elif event.get("type") == "error":

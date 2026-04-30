@@ -21,3 +21,4 @@ class PlannerState(TypedDict):
     food_response: str
     trip_plan: Optional[TripPlan]
     error: Optional[str]
+    user_profile_hint: Optional[str]  # 个性化偏好摘要，由 MemoryService 注入，供 Planner prompt 使用

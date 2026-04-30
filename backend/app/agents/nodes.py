@@ -156,6 +156,7 @@ class NodeFactory:
             state["hotel_response"],
             state["food_response"],
             cities=state["cities"],
+            user_profile_hint=state.get("user_profile_hint"),
         )
         try:
             response = await self._invoke_with_retry(

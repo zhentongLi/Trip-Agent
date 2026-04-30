@@ -40,6 +40,7 @@ from ..models.schemas import (
     WeatherInfo,
 )
 from ..services.amap_rest_client import AmapRestClient
+from .compressor import compress_agent_responses
 from .nodes import NodeFactory
 from .parsers import parse_adjust_response
 from .prompts import (
@@ -94,11 +95,17 @@ def _is_retryable_llm_error(err: Exception) -> bool:
 class MultiAgentTripPlanner:
     """多智能体旅行规划编排器（LangGraph 版）"""
 
-    def __init__(self, llm: ChatOpenAI, amap_client: AmapRestClient) -> None:
+    def __init__(
+        self,
+        llm: ChatOpenAI,
+        amap_client: AmapRestClient,
+        memory_service=None,
+    ) -> None:
         logger.info("🔄 初始化多智能体旅行规划系统（LangGraph）...")
 
         self._llm = llm
         self._amap_client = amap_client
+        self._memory_service = memory_service
         self._llm_call_semaphore = asyncio.Semaphore(2)
 
         # 创建 LangChain 工具
@@ -183,13 +190,17 @@ class MultiAgentTripPlanner:
     # ──────────────────────────────────────────
 
     async def plan_trip_stream(
-        self, request: TripRequest, cache=None
+        self,
+        request: TripRequest,
+        cache=None,
+        session_id: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
         """异步流式生成旅行计划（SSE 核心）
 
         Args:
-            request: 旅行请求
-            cache:   可选 TTLCache 实例；传入时启用缓存读写
+            request:    旅行请求
+            cache:      可选 TTLCache 实例；传入时启用缓存读写
+            session_id: 可选 session 标识符；传入时注入用户记忆并记录本次规划
         """
         # 缓存检查
         cache_key: Optional[str] = None
@@ -218,6 +229,16 @@ class MultiAgentTripPlanner:
         )
         primary_city = cities[0]
 
+        # 注入用户历史偏好（可选；无 memory_service 或 session_id 时跳过）
+        user_profile_hint: Optional[str] = None
+        if self._memory_service and session_id:
+            try:
+                ctx = await self._memory_service.async_build_context(session_id)
+                if ctx and ctx.strip():
+                    user_profile_hint = ctx
+            except Exception as e:
+                logger.warning(f"⚠️ 记忆注入失败，跳过: {e}")
+
         initial_state: PlannerState = {
             "request": request,
             "cities": cities,
@@ -228,6 +249,7 @@ class MultiAgentTripPlanner:
             "food_response": "",
             "trip_plan": None,
             "error": None,
+            "user_profile_hint": user_profile_hint,
         }
 
         yield {"type": "progress", "percent": 5,  "message": "🚀 开始规划..."}
@@ -254,6 +276,28 @@ class MultiAgentTripPlanner:
                             logger.success(f"💾 已写入缓存: {cache_key}")
                         yield {"type": "progress", "percent": 100, "message": "✅ 完成！"}
                         yield {"type": "done", "data": trip_plan.model_dump()}
+                        # 规划成功后记录到用户记忆（try/except 保证不影响主流程）
+                        if self._memory_service and session_id:
+                            try:
+                                total_attractions = sum(
+                                    len(d.attractions) for d in trip_plan.days
+                                )
+                                user_msg = (
+                                    f"规划 {request.city} {request.travel_days}天行程"
+                                )
+                                ai_msg = (
+                                    f"已生成{request.city}行程，"
+                                    f"{len(trip_plan.days)}天，"
+                                    f"含{total_attractions}个景点"
+                                )
+                                await self._memory_service.async_record_turn(
+                                    session_id,
+                                    user_msg,
+                                    ai_msg,
+                                    city=request.city,
+                                )
+                            except Exception as e:
+                                logger.warning(f"⚠️ 记忆记录失败，跳过: {e}")
                     else:
                         fallback = self._create_fallback_plan(request)
                         err_msg = node_output.get("error", "行程规划失败")
@@ -367,7 +411,16 @@ class MultiAgentTripPlanner:
         hotels: str = "",
         foods: str = "",
         cities: Optional[List[str]] = None,
+        user_profile_hint: Optional[str] = None,
     ) -> str:
+        from ..config import settings
+
+        # 上下文压缩（减少 Planner token 消耗，默认启用）
+        if settings.planner_compress_context:
+            attractions, weather, hotels, foods = compress_agent_responses(
+                attractions, weather, hotels, foods
+            )
+
         city_list = cities if cities and len(cities) >= 2 else [request.city]
         city_display = " → ".join(city_list) if len(city_list) > 1 else request.city
         is_multi_city = len(city_list) > 1
@@ -430,6 +483,10 @@ class MultiAgentTripPlanner:
 
         if request.free_text_input:
             query += f"\n\n**额外要求:** {request.free_text_input}"
+
+        # 注入用户历史偏好（供 Planner 参考，不强制覆盖用户本次明确要求）
+        if user_profile_hint:
+            query += f"\n\n## 用户历史偏好（供参考，不强制）\n{user_profile_hint}"
 
         return query
 
