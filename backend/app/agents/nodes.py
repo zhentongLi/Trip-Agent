@@ -7,21 +7,54 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import re
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
 
-from ..models.schemas import Location, TripPlan, TripRequest
+from ..models.schemas import Budget, DayPlan, Location, TripPlan, TripRequest, WeatherInfo
 from ..services.amap_rest_client import AmapRestClient
-from .parsers import parse_trip_response
+from .parsers import extract_json_str, parse_trip_response
 from .prompts import PLANNER_AGENT_PROMPT
 from .state import PlannerState
 
 if TYPE_CHECKING:
     from langchain_openai import ChatOpenAI
+
+
+# ── 单日规划系统提示词 ──────────────────────────────────────────────────────────
+_SINGLE_DAY_SYSTEM_PROMPT = """你是行程规划专家。根据给定信息，规划指定某一天的详细行程。
+
+只返回以下格式的纯 JSON，不要任何说明文字：
+{
+  "date": "YYYY-MM-DD",
+  "day_index": 0,
+  "description": "第1天行程概述",
+  "transportation": "交通方式",
+  "accommodation": "住宿类型",
+  "hotel": {"name": "酒店名称", "address": "酒店地址", "location": {"longitude": 116.4, "latitude": 39.9}, "price_range": "300-500元", "rating": "4.5", "distance": "距离景点2公里", "type": "经济型酒店", "estimated_cost": 400},
+  "attractions": [{"name": "景点名称", "address": "详细地址", "location": {"longitude": 116.4, "latitude": 39.9}, "visit_duration": 120, "description": "景点描述", "category": "景点类别", "ticket_price": 60}],
+  "meals": [
+    {"type": "breakfast", "name": "具体餐厅名称", "address": "地址", "description": "特色及人均消费", "estimated_cost": 25},
+    {"type": "lunch",     "name": "具体餐厅名称", "address": "地址", "description": "特色及人均消费", "estimated_cost": 80},
+    {"type": "dinner",    "name": "具体餐厅名称", "address": "地址", "description": "特色及人均消费", "estimated_cost": 100}
+  ]
+}
+
+重要：meals 必须包含 breakfast / lunch / dinner 三条，name 字段必须是具体餐厅名称。"""
+
+
+# ── 天气行解析正则 ──────────────────────────────────────────────────────────────
+_WEATHER_LINE_RE = re.compile(
+    r"日期:\s*(?P<date>\d{4}-\d{2}-\d{2})\s*\|"
+    r"\s*白天:\s*(?P<dw>[^\d|]+?)\s*(?P<dt>\d+)℃\s*\|"
+    r"\s*夜间:\s*(?P<nw>[^\d|]+?)\s*(?P<nt>\d+)℃"
+    r"(?:\s*\|\s*风向:\s*(?P<wind>[^|\n\d]+?)(?:\s*\|\s*|\s*(?P<power>\d+级)\s*|\s*$))?",
+)
 
 
 class NodeFactory:
@@ -143,11 +176,248 @@ class NodeFactory:
         }
 
     # ──────────────────────────────────────────
-    # 节点 2：plan（Planner LLM 整合 → JSON）
+    # 并行逐日规划辅助方法
+    # ──────────────────────────────────────────
+
+    @staticmethod
+    def _extract_city_section(text: str, city: str) -> str:
+        """从多城市文本中提取指定城市段落；单城市文本原样返回"""
+        marker = f"【{city}"
+        if marker not in text:
+            return text
+        start = text.find(marker)
+        nxt = text.find("【", start + 1)
+        return text[start:nxt].strip() if nxt > start else text[start:].strip()
+
+    @staticmethod
+    def _extract_weather_snippet(weather_text: str, date_str: str, city: str = "") -> str:
+        """提取指定日期的天气行（先搜城市段落，再搜全文）"""
+        section = NodeFactory._extract_city_section(weather_text, city) if city else weather_text
+        for line in section.splitlines():
+            if date_str in line:
+                return line.strip()
+        for line in weather_text.splitlines():
+            if date_str in line:
+                return line.strip()
+        return ""
+
+    @staticmethod
+    def _parse_weather_info(weather_text: str, start_date: str, total_days: int) -> List[WeatherInfo]:
+        """从 AMap 天气响应文本解析 WeatherInfo 列表（无 LLM 调用）"""
+        parsed: dict[str, WeatherInfo] = {}
+        for line in weather_text.splitlines():
+            m = _WEATHER_LINE_RE.search(line)
+            if m:
+                wind = (m.group("wind") or "").strip().rstrip("|").strip()
+                power = (m.group("power") or "").strip()
+                parsed[m.group("date")] = WeatherInfo(
+                    date=m.group("date"),
+                    day_weather=m.group("dw").strip(),
+                    night_weather=m.group("nw").strip(),
+                    day_temp=int(m.group("dt")),
+                    night_temp=int(m.group("nt")),
+                    wind_direction=wind,
+                    wind_power=power,
+                )
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        result: List[WeatherInfo] = []
+        for i in range(total_days):
+            day_str = (start_dt + timedelta(days=i)).strftime("%Y-%m-%d")
+            result.append(parsed.get(day_str) or WeatherInfo(
+                date=day_str, day_weather="晴", night_weather="晴",
+                day_temp=25, night_temp=15, wind_direction="南风", wind_power="1-3级",
+            ))
+        return result
+
+    def _build_single_day_query(
+        self,
+        request: TripRequest,
+        day_index: int,
+        day_date: str,
+        current_city: str,
+        attractions: str,
+        weather_snippet: str,
+        hotels: str,
+        foods: str,
+        total_days: int,
+        prev_city: str = "",
+    ) -> str:
+        """构建单日行程规划 prompt（紧凑版，约 1/3 token 消耗）"""
+        header = (
+            f"请规划第{day_index + 1}天（{day_date}，{current_city}）行程。\n"
+            f"交通：{request.transportation}，住宿：{request.accommodation}"
+        )
+        if request.preferences:
+            header += f"，偏好：{'、'.join(request.preferences)}"
+        if prev_city and prev_city != current_city:
+            header += (
+                f"\n⚠️ 今天从{prev_city}前往{current_city}，"
+                f"description 中注明跨城交通方式，景点安排1-2个。"
+            )
+        if request.budget_limit:
+            header += f"\n预算参考：约{request.budget_limit // total_days}元/天"
+        if weather_snippet:
+            header += f"\n今日天气：{weather_snippet}"
+
+        body = (
+            f"\n\n可选景点（{current_city}）：\n{attractions}"
+            f"\n\n酒店参考：\n{hotels}"
+            f"\n\n餐厅参考（必须选具体店名）：\n{foods}"
+        )
+        if request.free_text_input:
+            body += f"\n\n额外要求：{request.free_text_input}"
+
+        footer = (
+            f"\n\n要求：安排2-3个景点，breakfast/lunch/dinner各一条meal，指定一个酒店。"
+            f"day_index={day_index}，date=\"{day_date}\"。**只返回纯JSON，无任何说明文字。**"
+        )
+        return header + body + footer
+
+    async def _plan_single_day_async(
+        self,
+        query: str,
+        day_index: int,
+        day_date: str,
+        request: TripRequest,
+    ) -> Optional[DayPlan]:
+        """异步调用 LLM 规划单日行程，解析为 DayPlan"""
+        try:
+            response = await self._invoke_with_retry(
+                lambda: self._llm.ainvoke([
+                    SystemMessage(content=_SINGLE_DAY_SYSTEM_PROMPT),
+                    HumanMessage(content=query),
+                ]),
+                f"DayPlanner[{day_index + 1}]",
+            )
+            raw = response.content
+            json_str = extract_json_str(raw)
+            data = _json.loads(json_str)
+            # 补全必填字段（防 LLM 遗漏）
+            data.setdefault("date", day_date)
+            data.setdefault("day_index", day_index)
+            data.setdefault("transportation", request.transportation)
+            data.setdefault("accommodation", request.accommodation)
+            data.setdefault("description", f"第{day_index + 1}天行程")
+            day_plan = DayPlan.model_validate(data)
+            logger.success(f"✅ 第{day_index + 1}天行程规划完成")
+            return day_plan
+        except Exception as e:
+            logger.warning(f"⚠️ 第{day_index + 1}天规划失败: {e}")
+            return None
+
+    # ──────────────────────────────────────────
+    # 节点 2：plan（并行逐日 LLM 规划）
     # ──────────────────────────────────────────
 
     async def plan(self, state: PlannerState) -> dict:
-        """调用 Planner LLM 整合信息，生成 JSON 行程"""
+        """并行调用 LLM 逐日规划，失败时回退到整体单次规划"""
+        request: TripRequest = state["request"]
+        cities: List[str] = state["cities"]
+        total_days = request.travel_days
+
+        # ── 尝试并行逐日规划 ──
+        try:
+            from ..config import settings
+            from .compressor import compress_agent_responses
+
+            attraction_raw = state["attraction_response"]
+            weather_raw = state["weather_response"]
+            hotel_raw = state["hotel_response"]
+            food_raw = state["food_response"]
+
+            # 压缩（减少每日 prompt token）
+            if settings.planner_compress_context:
+                attraction_raw, weather_raw, hotel_raw, food_raw = compress_agent_responses(
+                    attraction_raw, weather_raw, hotel_raw, food_raw
+                )
+
+            # 计算多城市日程分配
+            days_per_city = max(1, total_days // len(cities))
+            remainder = total_days - days_per_city * len(cities)
+            city_schedule: List[str] = []
+            for idx, city in enumerate(cities):
+                days = days_per_city + (1 if idx < remainder else 0)
+                city_schedule.extend([city] * days)
+
+            start_dt = datetime.strptime(request.start_date, "%Y-%m-%d")
+
+            # 为每天构建查询
+            tasks = []
+            for i in range(total_days):
+                day_date = (start_dt + timedelta(days=i)).strftime("%Y-%m-%d")
+                current_city = city_schedule[i] if i < len(city_schedule) else cities[0]
+                prev_city = city_schedule[i - 1] if i > 0 else ""
+
+                city_attractions = self._extract_city_section(attraction_raw, current_city)
+                weather_snippet = self._extract_weather_snippet(
+                    weather_raw, day_date, current_city
+                )
+                query = self._build_single_day_query(
+                    request=request,
+                    day_index=i,
+                    day_date=day_date,
+                    current_city=current_city,
+                    attractions=city_attractions,
+                    weather_snippet=weather_snippet,
+                    hotels=hotel_raw,
+                    foods=food_raw,
+                    total_days=total_days,
+                    prev_city=prev_city,
+                )
+                tasks.append(self._plan_single_day_async(query, i, day_date, request))
+
+            logger.info(f"🚀 并行规划 {total_days} 天行程...")
+            day_results: List[Optional[DayPlan]] = await asyncio.gather(*tasks)
+
+            # 检查是否全部成功
+            failed = [i + 1 for i, r in enumerate(day_results) if r is None]
+            if failed:
+                raise RuntimeError(f"第 {failed} 天规划失败，切换回整体模式")
+
+            # 解析天气（从原始文本，无 LLM）
+            weather_info = self._parse_weather_info(
+                state["weather_response"], request.start_date, total_days
+            )
+
+            # 汇总预算
+            total_attr = sum(a.ticket_price for d in day_results for a in d.attractions)  # type: ignore[union-attr]
+            total_hotel = sum(
+                (d.hotel.estimated_cost if d and d.hotel else 0) for d in day_results
+            )
+            total_meal = sum(m.estimated_cost for d in day_results for m in d.meals)  # type: ignore[union-attr]
+            budget = Budget(
+                total_attractions=total_attr,
+                total_hotels=total_hotel,
+                total_meals=total_meal,
+                total_transportation=0,
+                total=total_attr + total_hotel + total_meal,
+            )
+
+            hint = state.get("user_profile_hint")
+            overall = f"{'→'.join(cities)}{total_days}日游行程，祝您旅途愉快！"
+            if hint:
+                overall += " 已根据您的历史偏好个性化优化。"
+
+            trip_plan = TripPlan(
+                city=request.city,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                days=day_results,  # type: ignore[arg-type]
+                weather_info=weather_info,
+                overall_suggestions=overall,
+                budget=budget,
+            )
+            logger.success(f"✅ plan 节点完成（并行逐日模式，{total_days} 天）")
+            return {"trip_plan": trip_plan, "error": None}
+
+        except Exception as parallel_err:
+            logger.warning(f"⚠️ 并行规划异常，回退整体模式: {parallel_err}")
+
+        # ── 回退：整体一次性 LLM 规划 ──
+        return await self._plan_single_call(state)
+
+    async def _plan_single_call(self, state: PlannerState) -> dict:
+        """回退方案：整体一次 LLM 调用生成全程 JSON"""
         request: TripRequest = state["request"]
         planner_query = self._build_planner_query(
             request,
@@ -169,7 +439,7 @@ class NodeFactory:
             trip_plan = parse_trip_response(response.content, request)
             if trip_plan is None:
                 trip_plan = self._create_fallback_plan(request)
-            logger.success("✅ plan 节点完成")
+            logger.success("✅ plan 节点完成（整体模式）")
             return {"trip_plan": trip_plan, "error": None}
         except Exception as e:
             if self._is_retryable_llm_error(e):
