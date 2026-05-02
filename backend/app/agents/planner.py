@@ -106,7 +106,7 @@ class MultiAgentTripPlanner:
         self._llm = llm
         self._amap_client = amap_client
         self._memory_service = memory_service
-        self._llm_call_semaphore = asyncio.Semaphore(2)
+        self._llm_call_semaphore = asyncio.Semaphore(3)  # 允许3路并发：支持逐日并行规划
 
         # 创建 LangChain 工具
         search_tool, weather_tool = make_amap_tools(amap_client)

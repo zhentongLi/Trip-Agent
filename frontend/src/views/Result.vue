@@ -236,6 +236,25 @@
                         <a-button type="link" size="small" style="padding-left: 0" @click="openGuideDrawer(item.name)">
                           🎙️ 获取导游解说
                         </a-button>
+                        <!-- 票务预订跳转 -->
+                        <a-divider style="margin: 8px 0" />
+                        <div class="booking-links">
+                          <span class="booking-label">🎟️ 购票 / 查价：</span>
+                          <a-space size="small" wrap>
+                            <a-button
+                              size="small" type="primary" ghost
+                              @click="openBookingLink(getAttractionLinks(item.name, tripPlan!.city).ctrip, 'ctrip_attraction', item.name)"
+                            >携程</a-button>
+                            <a-button
+                              size="small" type="primary" ghost
+                              @click="openBookingLink(getAttractionLinks(item.name, tripPlan!.city).meituan, 'meituan_attraction', item.name)"
+                            >美团</a-button>
+                            <a-button
+                              size="small"
+                              @click="openBookingLink(getAttractionLinks(item.name, tripPlan!.city).damai, 'damai_attraction', item.name)"
+                            >大麦网</a-button>
+                          </a-space>
+                        </div>
                       </div>
                     </a-card>
                   </a-list-item>
@@ -255,6 +274,34 @@
                   <a-descriptions-item label="评分">{{ day.hotel.rating }}⭐</a-descriptions-item>
                   <a-descriptions-item label="距离" :span="2">{{ day.hotel.distance }}</a-descriptions-item>
                 </a-descriptions>
+                <!-- 酒店预订跳转 -->
+                <a-divider style="margin: 8px 0" />
+                <div class="booking-links">
+                  <span class="booking-label">🏨 查看/预订：</span>
+                  <a-space size="small" wrap>
+                    <a-button
+                      size="small" type="primary"
+                      @click="openBookingLink(
+                        getHotelLinks(day.hotel.name, tripPlan!.city, day.date, tripPlan!.end_date).ctrip,
+                        'ctrip_hotel', day.hotel.name
+                      )"
+                    >携程订房</a-button>
+                    <a-button
+                      size="small" type="default"
+                      @click="openBookingLink(
+                        getHotelLinks(day.hotel.name, tripPlan!.city, day.date, tripPlan!.end_date).feizhu,
+                        'feizhu_hotel', day.hotel.name
+                      )"
+                    >飞猪</a-button>
+                    <a-button
+                      size="small" type="default"
+                      @click="openBookingLink(
+                        getHotelLinks(day.hotel.name, tripPlan!.city, day.date, tripPlan!.end_date).meituan,
+                        'meituan_hotel', day.hotel.name
+                      )"
+                    >美团酒店</a-button>
+                  </a-space>
+                </div>
               </a-card>
 
               <!-- 餐饮安排 -->
@@ -567,6 +614,7 @@ import html2canvas from 'html2canvas'
 import type { TripPlan, AdjustChatEntry, GuideReference, GuideDebugMeta } from '@/types'
 import { createShare, getSharedTrip, saveHistory, adjustTripPlan, exportTripPdfBackend, saveUserTrip, askGuideQuestion } from '@/services/api'
 import { isLoggedIn, getToken } from '@/services/auth'
+import { getAttractionLinks, getHotelLinks, openBookingLink } from '@/services/booking'
 
 const router = useRouter()
 const route = useRoute()
@@ -1972,6 +2020,20 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   color: #404a57;
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* ── 预订跳转区 ── */
+.booking-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.booking-label {
+  font-size: 12px;
+  color: #888;
+  white-space: nowrap;
 }
 </style>
 
