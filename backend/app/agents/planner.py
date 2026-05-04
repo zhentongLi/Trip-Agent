@@ -43,6 +43,7 @@ from ..services.amap_rest_client import AmapRestClient
 from .compressor import compress_agent_responses
 from .nodes import NodeFactory
 from .parsers import parse_adjust_response
+from .token_budget import allocate as allocate_token_budget
 from .prompts import (
     ATTRACTION_AGENT_PROMPT,
     FOOD_AGENT_PROMPT,
@@ -109,6 +110,9 @@ class MultiAgentTripPlanner:
         self._gather_semaphore = asyncio.Semaphore(4)  # gather 阶段：4个 Agent 并发槽
         self._plan_semaphore = asyncio.Semaphore(4)    # plan 阶段：4个逐日规划并发槽
 
+        from ..config import get_settings as _get_settings
+        self._total_token_budget = _get_settings().total_token_budget
+
         # 创建 LangChain 工具
         search_tool, weather_tool = make_amap_tools(amap_client)
 
@@ -144,6 +148,7 @@ class MultiAgentTripPlanner:
             create_fallback_plan=self._create_fallback_plan,
             gather_semaphore=self._gather_semaphore,
             plan_semaphore=self._plan_semaphore,
+            total_token_budget=self._total_token_budget,
         )
 
         # 构建 LangGraph 状态图

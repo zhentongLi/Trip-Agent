@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # Planner 上下文压缩（默认启用，可通过 PLANNER_COMPRESS_CONTEXT=false 关闭）
     planner_compress_context: bool = Field(default=True, alias="PLANNER_COMPRESS_CONTEXT")
 
+    # Token 预算总量（所有阶段 LLM 输出 token 之和上限，按复杂度比例分配）
+    # 16000 适合大多数商用模型；若模型输出上限更低可适当调小
+    total_token_budget: int = Field(default=16_000, alias="TOTAL_TOKEN_BUDGET")
+
     model_config = ConfigDict(
         env_file=".env",
         case_sensitive=False,

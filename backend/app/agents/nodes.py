@@ -22,6 +22,7 @@ from .parsers import extract_json_str, parse_trip_response
 from .preprocessor import is_valid_response, preprocess_responses
 from .prompts import PLANNER_AGENT_PROMPT
 from .state import PlannerState
+from .token_budget import BudgetPlan, allocate as allocate_token_budget
 
 if TYPE_CHECKING:
     from langchain_openai import ChatOpenAI
@@ -85,6 +86,7 @@ class NodeFactory:
         create_fallback_plan: Callable,
         gather_semaphore: Optional[asyncio.Semaphore] = None,
         plan_semaphore: Optional[asyncio.Semaphore] = None,
+        total_token_budget: int = 0,
     ) -> None:
         self._attraction_agent = attraction_agent
         self._weather_agent = weather_agent
@@ -98,6 +100,8 @@ class NodeFactory:
         self._create_fallback_plan = create_fallback_plan
         self._gather_semaphore = gather_semaphore
         self._plan_semaphore = plan_semaphore
+        # 0 表示不启用预算限制；正数在每次请求时按 travel_days 动态分配
+        self._total_token_budget = total_token_budget
         self._amap_semaphore = asyncio.Semaphore(5)  # AMap API 并发上限
 
     # ──────────────────────────────────────────
@@ -299,11 +303,17 @@ class NodeFactory:
         day_index: int,
         day_date: str,
         request: TripRequest,
+        budget: Optional[BudgetPlan] = None,
     ) -> Optional[DayPlan]:
         """异步调用 LLM 规划单日行程，解析为 DayPlan。JSON 解析失败时最多重试 2 次。"""
         _MAX_JSON_RETRIES = 2
         last_raw: str = ""
         last_json_err: str = ""
+        # 按预算计划绑定 max_tokens；未配置预算时使用原始 LLM
+        llm = (
+            self._llm.bind(max_tokens=budget.day_plan)
+            if budget else self._llm
+        )
 
         for attempt in range(1, _MAX_JSON_RETRIES + 2):
             try:
@@ -319,7 +329,7 @@ class NodeFactory:
                         ),
                     ]
                 response = await self._invoke_with_retry(
-                    lambda m=messages: self._llm.ainvoke(m),
+                    lambda m=messages: llm.ainvoke(m),
                     f"DayPlanner[{day_index + 1}]",
                     self._plan_semaphore,
                 )
@@ -359,6 +369,14 @@ class NodeFactory:
         request: TripRequest = state["request"]
         cities: List[str] = state["cities"]
         total_days = request.travel_days
+
+        # 按行程天数动态分配 token 预算（total_token_budget=0 表示不启用）
+        budget: Optional[BudgetPlan] = (
+            allocate_token_budget(self._total_token_budget, total_days)
+            if self._total_token_budget > 0 else None
+        )
+        if budget:
+            logger.debug(f"Token预算: {budget}")
 
         # ── 尝试并行逐日规划 ──
         try:
@@ -409,7 +427,7 @@ class NodeFactory:
                     total_days=total_days,
                     prev_city=prev_city,
                 )
-                tasks.append(self._plan_single_day_async(query, i, day_date, request))
+                tasks.append(self._plan_single_day_async(query, i, day_date, request, budget))
 
             logger.info(f"🚀 并行规划 {total_days} 天行程...")
             day_results: List[Optional[DayPlan]] = await asyncio.gather(*tasks)
@@ -459,11 +477,17 @@ class NodeFactory:
             logger.warning(f"⚠️ 并行规划异常，回退整体模式: {parallel_err}")
 
         # ── 回退：整体一次性 LLM 规划 ──
-        return await self._plan_single_call(state)
+        return await self._plan_single_call(state, budget)
 
-    async def _plan_single_call(self, state: PlannerState) -> dict:
+    async def _plan_single_call(
+        self, state: PlannerState, budget: Optional[BudgetPlan] = None
+    ) -> dict:
         """回退方案：整体一次 LLM 调用生成全程 JSON"""
         request: TripRequest = state["request"]
+        llm = (
+            self._llm.bind(max_tokens=budget.full_plan)
+            if budget else self._llm
+        )
         planner_query = self._build_planner_query(
             request,
             state["attraction_response"],
@@ -475,7 +499,7 @@ class NodeFactory:
         )
         try:
             response = await self._invoke_with_retry(
-                lambda: self._llm.ainvoke([
+                lambda: llm.ainvoke([
                     SystemMessage(content=PLANNER_AGENT_PROMPT),
                     HumanMessage(content=planner_query),
                 ]),
