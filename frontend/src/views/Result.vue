@@ -133,7 +133,7 @@
 
         <!-- 每日行程:可折叠 -->
         <a-card title="📅 每日行程" :bordered="false" class="days-card">
-          <a-collapse v-model:activeKey="activeDays" accordion>
+          <a-collapse v-model:activeKey="activeDays">
             <a-collapse-panel
               v-for="(day, index) in tripPlan.days"
               :key="index"
@@ -623,7 +623,7 @@ const editMode = ref(false)
 const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
 const activeSection = ref('overview')
-const activeDays = ref<number[]>([0]) // 默认展开第一天
+const activeDays = ref<number[]>([])
 const sharing = ref(false)
 // 功能23：云端保存
 const saving = ref(false)
@@ -693,6 +693,7 @@ const loadPlanData = async () => {
   }
 
   if (tripPlan.value) {
+    activeDays.value = tripPlan.value.days.map((_, i) => i)
     await loadAttractionPhotos()
     await nextTick()
     await initMap()

@@ -102,6 +102,20 @@ class UnsplashService:
                 url = results[0]["urls"]["regular"]
                 logger.debug(f"图片URL: {search_query} → {url}")
                 return url
+            # 无结果时回退到城市名搜索
+            if city and search_query != city:
+                logger.debug(f"图片搜索无结果: {search_query}，回退城市名: {city}")
+                resp2 = self.session.get(
+                    f"{self.BASE_URL}/search/photos",
+                    params={"query": city, "per_page": 1, "orientation": "landscape"},
+                    timeout=10,
+                )
+                if resp2.status_code == 200:
+                    results2 = resp2.json().get("results", [])
+                    if results2:
+                        url = results2[0]["urls"]["regular"]
+                        logger.debug(f"图片URL（城市回退）: {city} → {url}")
+                        return url
             logger.debug(f"图片搜索无结果: {search_query}")
             return None
         except Exception as e:

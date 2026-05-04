@@ -13,7 +13,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, List, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from loguru import logger
 
 from ..models.schemas import Budget, DayPlan, Location, TripPlan, TripRequest, WeatherInfo
@@ -280,30 +280,54 @@ class NodeFactory:
         day_date: str,
         request: TripRequest,
     ) -> Optional[DayPlan]:
-        """异步调用 LLM 规划单日行程，解析为 DayPlan"""
-        try:
-            response = await self._invoke_with_retry(
-                lambda: self._llm.ainvoke([
+        """异步调用 LLM 规划单日行程，解析为 DayPlan。JSON 解析失败时最多重试 2 次。"""
+        _MAX_JSON_RETRIES = 2
+        last_raw: str = ""
+        last_json_err: str = ""
+
+        for attempt in range(1, _MAX_JSON_RETRIES + 2):
+            try:
+                messages: list = [
                     SystemMessage(content=_SINGLE_DAY_SYSTEM_PROMPT),
                     HumanMessage(content=query),
-                ]),
-                f"DayPlanner[{day_index + 1}]",
-            )
-            raw = response.content
-            json_str = extract_json_str(raw)
-            data = _json.loads(json_str)
-            # 补全必填字段（防 LLM 遗漏）
-            data.setdefault("date", day_date)
-            data.setdefault("day_index", day_index)
-            data.setdefault("transportation", request.transportation)
-            data.setdefault("accommodation", request.accommodation)
-            data.setdefault("description", f"第{day_index + 1}天行程")
-            day_plan = DayPlan.model_validate(data)
-            logger.success(f"✅ 第{day_index + 1}天行程规划完成")
-            return day_plan
-        except Exception as e:
-            logger.warning(f"⚠️ 第{day_index + 1}天规划失败: {e}")
-            return None
+                ]
+                if attempt > 1 and last_raw:
+                    messages += [
+                        AIMessage(content=last_raw),
+                        HumanMessage(
+                            content=f"JSON 格式有误（{last_json_err}），请仅输出合法的纯 JSON，不包含任何说明文字。"
+                        ),
+                    ]
+                response = await self._invoke_with_retry(
+                    lambda m=messages: self._llm.ainvoke(m),
+                    f"DayPlanner[{day_index + 1}]",
+                )
+                last_raw = response.content
+                json_str = extract_json_str(last_raw)
+                data = _json.loads(json_str)
+                # 补全必填字段（防 LLM 遗漏）
+                data.setdefault("date", day_date)
+                data.setdefault("day_index", day_index)
+                data.setdefault("transportation", request.transportation)
+                data.setdefault("accommodation", request.accommodation)
+                data.setdefault("description", f"第{day_index + 1}天行程")
+                day_plan = DayPlan.model_validate(data)
+                logger.success(f"✅ 第{day_index + 1}天行程规划完成")
+                return day_plan
+
+            except (_json.JSONDecodeError, ValueError) as e:
+                last_json_err = str(e)
+                if attempt <= _MAX_JSON_RETRIES:
+                    logger.warning(
+                        f"⚠️ 第{day_index + 1}天JSON解析失败（第{attempt}次），重试: {e}"
+                    )
+                    continue
+                logger.warning(f"⚠️ 第{day_index + 1}天规划失败: {e}")
+                return None
+
+            except Exception as e:
+                logger.warning(f"⚠️ 第{day_index + 1}天规划失败: {e}")
+                return None
 
     # ──────────────────────────────────────────
     # 节点 2：plan（并行逐日 LLM 规划）
