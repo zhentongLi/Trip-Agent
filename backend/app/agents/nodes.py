@@ -19,6 +19,7 @@ from loguru import logger
 from ..models.schemas import Budget, DayPlan, Location, TripPlan, TripRequest, WeatherInfo
 from ..services.amap_rest_client import AmapRestClient
 from .parsers import extract_json_str, parse_trip_response
+from .preprocessor import is_valid_response, preprocess_responses
 from .prompts import PLANNER_AGENT_PROMPT
 from .state import PlannerState
 
@@ -82,6 +83,8 @@ class NodeFactory:
         is_retryable_llm_error: Callable[[Exception], bool],
         build_planner_query: Callable,
         create_fallback_plan: Callable,
+        gather_semaphore: Optional[asyncio.Semaphore] = None,
+        plan_semaphore: Optional[asyncio.Semaphore] = None,
     ) -> None:
         self._attraction_agent = attraction_agent
         self._weather_agent = weather_agent
@@ -93,6 +96,9 @@ class NodeFactory:
         self._is_retryable_llm_error = is_retryable_llm_error
         self._build_planner_query = build_planner_query
         self._create_fallback_plan = create_fallback_plan
+        self._gather_semaphore = gather_semaphore
+        self._plan_semaphore = plan_semaphore
+        self._amap_semaphore = asyncio.Semaphore(5)  # AMap API 并发上限
 
     # ──────────────────────────────────────────
     # 节点 1：gather（并行调用四个专项 Agent）
@@ -122,11 +128,12 @@ class NodeFactory:
                 result = await self._invoke_with_retry(
                     lambda: agent.ainvoke({"messages": [HumanMessage(content=query)]}),
                     f"Agent[{label}]",
+                    self._gather_semaphore,
                 )
                 return result["messages"][-1].content
             except Exception as e:
                 logger.warning(f"Agent [{label}] 调用异常: {e}")
-                return f"暂无{label}数据"
+                return ""
 
         all_tasks = [
             *[
@@ -149,30 +156,43 @@ class NodeFactory:
         food_result = all_results[2 * n + 1]
 
         def _safe(r, label: str = "") -> str:
+            """异常转空串；质量过低的响应也过滤掉"""
             if isinstance(r, Exception):
                 logger.warning(f"并行任务异常 [{label}]: {r}")
-                return f"暂无{label}数据"
-            return str(r)
+                return ""
+            text = str(r)
+            if not is_valid_response(text):
+                logger.warning(f"Agent [{label}] 响应质量不足，已过滤")
+                return ""
+            return text
+
+        def _build_multi_city(results, city_list: List[str], kind: str) -> str:
+            parts = []
+            for i, r in enumerate(results):
+                text = _safe(r, f"{city_list[i]}{kind}")
+                if text:
+                    parts.append(f"【{city_list[i]}{kind}信息】\n{text}")
+                else:
+                    logger.warning(f"城市 {city_list[i]} {kind}数据无效，跳过")
+            # 对多城市同类响应做精确去重 + 相似去重（跨城市幂等保护）
+            return "\n\n".join(preprocess_responses(parts)) if parts else f"暂无{kind}数据"
 
         if len(cities) > 1:
-            attraction_response = "\n\n".join(
-                f"【{cities[i]}景点信息】\n{_safe(r, f'{cities[i]}景点')}"
-                for i, r in enumerate(attraction_results)
-            )
-            weather_response = "\n\n".join(
-                f"【{cities[i]}天气信息】\n{_safe(r, f'{cities[i]}天气')}"
-                for i, r in enumerate(weather_results)
-            )
+            attraction_response = _build_multi_city(attraction_results, cities[:n], "景点")
+            weather_response = _build_multi_city(weather_results, cities[:n], "天气")
         else:
-            attraction_response = _safe(attraction_results[0], "景点")
-            weather_response = _safe(weather_results[0], "天气")
+            attraction_response = _safe(attraction_results[0], "景点") or "暂无景点数据"
+            weather_response = _safe(weather_results[0], "天气") or "暂无天气数据"
+
+        hotel_response = _safe(hotel_result, "酒店") or "暂无酒店数据"
+        food_response = _safe(food_result, "餐饮") or "暂无餐饮数据"
 
         logger.success(f"✅ gather 节点完成（{len(all_tasks)} 个并行任务）")
         return {
             "attraction_response": attraction_response,
             "weather_response": weather_response,
-            "hotel_response": _safe(hotel_result, "酒店"),
-            "food_response": _safe(food_result, "餐饮"),
+            "hotel_response": hotel_response,
+            "food_response": food_response,
         }
 
     # ──────────────────────────────────────────
@@ -301,6 +321,7 @@ class NodeFactory:
                 response = await self._invoke_with_retry(
                     lambda m=messages: self._llm.ainvoke(m),
                     f"DayPlanner[{day_index + 1}]",
+                    self._plan_semaphore,
                 )
                 last_raw = response.content
                 json_str = extract_json_str(last_raw)
@@ -459,6 +480,7 @@ class NodeFactory:
                     HumanMessage(content=planner_query),
                 ]),
                 "Planner",
+                self._plan_semaphore,
             )
             trip_plan = parse_trip_response(response.content, request)
             if trip_plan is None:
@@ -488,6 +510,8 @@ class NodeFactory:
             self._enrich_opening_hours_async(trip_plan, primary_city),
         )
         self._add_weather_warnings(trip_plan)
+        self._dedup_attractions(trip_plan)
+        self._dedup_meals(trip_plan)
         logger.success("✅ postprocess 节点完成")
         return {"trip_plan": trip_plan, "error": None}
 
@@ -496,7 +520,7 @@ class NodeFactory:
     # ──────────────────────────────────────────
 
     async def _fix_coordinates_async(self, trip_plan: TripPlan, city: str) -> None:
-        """并发修正所有景点经纬度坐标"""
+        """并发修正所有景点经纬度坐标（受 AMap 信号量限流）"""
         attractions = [
             (attraction, day)
             for day in trip_plan.days
@@ -506,10 +530,11 @@ class NodeFactory:
         if not attractions:
             return
 
-        tasks = [
-            self._amap_client.geocode_async(attr.address, city)
-            for attr, _ in attractions
-        ]
+        async def _geocode(attr):
+            async with self._amap_semaphore:
+                return await self._amap_client.geocode_async(attr.address, city)
+
+        tasks = [_geocode(attr) for attr, _ in attractions]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for (attraction, _), result in zip(attractions, results):
@@ -578,7 +603,7 @@ class NodeFactory:
                 logger.warning(f"🚨 {weather.date} 天气预警: {weather.weather_warning}")
 
     async def _enrich_opening_hours_async(self, trip_plan: TripPlan, city: str) -> None:
-        """并发获取所有景点真实开放时间"""
+        """并发获取所有景点真实开放时间（受 AMap 信号量限流）"""
         attractions = [
             attraction
             for day in trip_plan.days
@@ -587,10 +612,11 @@ class NodeFactory:
         if not attractions:
             return
 
-        tasks = [
-            self._amap_client.get_opening_hours_async(attr.name, city)
-            for attr in attractions
-        ]
+        async def _get_hours(attr):
+            async with self._amap_semaphore:
+                return await self._amap_client.get_opening_hours_async(attr.name, city)
+
+        tasks = [_get_hours(attr) for attr in attractions]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for attraction, result in zip(attractions, results):
@@ -608,3 +634,50 @@ class NodeFactory:
                 if opentime:
                     attraction.opening_hours = opentime
                     logger.debug(f"🕐 {attraction.name} 开放时间: {opentime}")
+
+    def _dedup_attractions(self, trip_plan: TripPlan) -> None:
+        """跨天景点去重：同名景点仅保留首次出现（精确匹配 + Jaccard > 0.85 相似匹配）"""
+        from .preprocessor import _jaccard  # 局部引用避免循环
+        seen_names: list[str] = []
+        removed = 0
+        for day in trip_plan.days:
+            unique = []
+            for attr in day.attractions:
+                norm = attr.name.strip()
+                # 精确去重
+                if norm in seen_names:
+                    logger.debug(f"跨天去重（精确）: 第{day.day_index + 1}天移除「{attr.name}」")
+                    removed += 1
+                    continue
+                # 相似去重（Jaccard > 0.85）
+                if any(_jaccard(norm, s) > 0.85 for s in seen_names):
+                    logger.debug(f"跨天去重（相似）: 第{day.day_index + 1}天移除「{attr.name}」")
+                    removed += 1
+                    continue
+                seen_names.append(norm)
+                unique.append(attr)
+            day.attractions = unique
+        if removed:
+            logger.info(f"景点跨天去重：移除 {removed} 个重复景点")
+
+    def _dedup_meals(self, trip_plan: TripPlan) -> None:
+        """跨天餐厅去重：同名餐厅跨天出现时保留首次（按餐型分组，同一天 breakfast/lunch/dinner 不互相比较）"""
+        seen_by_type: dict[str, list[str]] = {}  # meal_type → [restaurant_name, ...]
+        removed = 0
+        for day in trip_plan.days:
+            unique = []
+            for meal in day.meals:
+                meal_type = meal.type
+                name = meal.name.strip()
+                seen = seen_by_type.setdefault(meal_type, [])
+                if name in seen:
+                    logger.debug(
+                        f"餐厅跨天去重: 第{day.day_index + 1}天 {meal_type}「{name}」已出现，跳过"
+                    )
+                    removed += 1
+                    continue
+                seen.append(name)
+                unique.append(meal)
+            day.meals = unique
+        if removed:
+            logger.info(f"餐厅跨天去重：移除 {removed} 个重复餐厅")
