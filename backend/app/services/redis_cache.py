@@ -88,3 +88,19 @@ class RedisCache:
 
     def size(self) -> int:
         return self._fallback.size()
+
+    def stats(self) -> dict:
+        """返回缓存统计信息，优先从 Redis 查询，失败时回退到本地。"""
+        try:
+            pattern = f"{self._ns}:trip:*"
+            keys = [k.decode() if isinstance(k, bytes) else k
+                    for k in self._redis.keys(pattern)]
+            return {
+                "backend": "redis",
+                "size": len(keys),
+                "ttl_seconds": self._ttl,
+                "keys": [k.removeprefix(f"{self._ns}:") for k in keys],
+            }
+        except Exception as e:
+            logger.warning(f"redis stats fallback err={e}")
+            return {**self._fallback.stats(), "backend": "local_fallback"}
