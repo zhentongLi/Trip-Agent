@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cd backend
 
-# Run all tests (50 test cases)
+# Run all tests (~98 test cases)
 /opt/anaconda3/envs/trip-agent/bin/python -m pytest tests/ -q
 # or with conda:
 conda run -n trip-agent python -m pytest tests/ -q
@@ -64,8 +64,20 @@ app/
 │       └── map.py       # AMap POI/weather/route utilities
 ├── agents/              # LangGraph multi-agent system
 │   ├── planner.py       # MultiAgentTripPlanner — plan_trip_stream, plan_trip, adjust_trip
+│   │                    #   Two semaphores: _gather_semaphore(4) and _plan_semaphore(4)
 │   │                    #   Cache read/write uses await cache.aget/aset (async-aware)
 │   ├── nodes.py         # NodeFactory — gather / plan / postprocess LangGraph nodes
+│   │                    #   _stream_llm_with_latency(): streams plan-phase LLM calls,
+│   │                    #   logs TTFT (network queuing) and generation time separately
+│   ├── preprocessor.py  # preprocess_responses(): 3-step gather output cleaning
+│   │                    #   1. quality filter (_FAILURE_PATTERNS, min 20 chars)
+│   │                    #   2. exact dedup (MD5 hash)
+│   │                    #   3. Jaccard similarity dedup (threshold 0.85)
+│   ├── token_budget.py  # allocate(total, days) → BudgetPlan(frozen dataclass)
+│   │                    #   Proportional allocation by complexity weight per task type
+│   │                    #   gather=0.03, day_plan=0.20, full_plan_per_day=0.28
+│   ├── compressor.py    # compress_agent_responses() — rule-based (no LLM) context compression
+│   │                    #   POI: ~50-55% reduction; weather: ~55-60%; overall: ~60-70%
 │   ├── parsers.py       # extract_json_str, parse_trip_response, parse_adjust_response
 │   ├── prompts.py       # All 5 agent system prompts
 │   ├── state.py         # PlannerState TypedDict
@@ -114,16 +126,24 @@ app/
 ```
 START → gather → plan → postprocess → END
 
-gather:      NodeFactory.gather() — asyncio.gather() 4 agents in parallel
-             Attraction × N cities, Weather × N cities, Hotel, Food
+gather:      NodeFactory.gather() — asyncio.gather() up to 2N+2 agents in parallel
+             Attraction × N cities, Weather × N cities, Hotel, Food (max N=3)
+             Output passed through preprocess_responses() before being stored in state
+             _gather_semaphore(4) limits concurrent LLM slots
 
-plan:        NodeFactory.plan() — Planner LLM → JSON → parse_trip_response()
-             Retries up to 3× on 502/503/timeout via _invoke_with_retry()
+plan:        NodeFactory.plan() — tries parallel per-day mode first, falls back to single call
+             Per-day: N tasks via asyncio.gather(), each calls _stream_llm_with_latency()
+             which logs TTFT + generation time; JSON parse errors retry up to 2×
+             Token budget allocated via allocate(total_budget, travel_days) → BudgetPlan
+             _plan_semaphore(4) limits concurrent LLM slots
+             Fallback: _plan_single_call() — one LLM call for full itinerary JSON
 
-postprocess: NodeFactory.postprocess()
-             _fix_coordinates()      → AmapRestClient.geocode()
-             _add_weather_warnings() → regex on weather strings
-             _enrich_opening_hours() → AmapRestClient.get_opening_hours()
+postprocess: NodeFactory.postprocess() — order matters:
+             1. _dedup_attractions()     → cross-day exact + Jaccard dedup (before API calls)
+             2. _dedup_meals()           → cross-day per-meal-type restaurant dedup
+             3. _fix_coordinates_async() → AmapRestClient.geocode() (concurrent, Semaphore(5))
+             4. _enrich_opening_hours()  → AmapRestClient.get_opening_hours() (concurrent)
+             5. _add_weather_warnings()  → regex on weather strings
              → writes result to RedisCache / TTLCache
 ```
 
@@ -219,6 +239,8 @@ app.dependency_overrides.pop(get_trip_cache, None)
 
 The `client_with_mock_planner` fixture in `conftest.py` handles this automatically.
 
+When mocking `NodeFactory` internals (e.g. `_stream_llm_with_latency`), assign an `AsyncMock` directly on the factory instance — do not mock `_invoke_with_retry`, which is only used by gather-phase agent calls.
+
 ### Skills System
 
 Pluggable capability layer built on the **strategy + registry** pattern — frontend discovers skills dynamically via `GET /api/skills`, invokes them through dedicated routes.
@@ -276,6 +298,7 @@ JWT_SECRET_KEY=<secret>
 PORT=8000
 CORS_ORIGINS=http://localhost:5173
 UNSPLASH_ACCESS_KEY=<key>
+TOTAL_TOKEN_BUDGET=16000        # total max_tokens budget per planning request
 
 # Redis (all optional — omit to use local in-memory fallback)
 REDIS_URL=redis://localhost:6379/0        # also accepted: MEMORY_REDIS_URL
