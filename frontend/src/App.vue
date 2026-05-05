@@ -4,7 +4,7 @@
       <!-- 顶部导航栏 -->
       <a-layout-header class="app-header">
         <div class="header-left">
-          <span class="app-title" @click="$router.push('/')">🌍 HelloAgents 旅行助手</span>
+          <span class="app-title" @click="$router.push('/')">🌍 通智旅行AI智能规划助手</span>
         </div>
         <div class="header-right">
           <!-- 已登录 -->
@@ -36,7 +36,7 @@
       </a-layout-content>
 
       <a-layout-footer style="text-align: center">
-        HelloAgents 智能旅行助手 ©2026 基于 HelloAgents 框架
+        通智旅行AI智能规划助手 ©2026
       </a-layout-footer>
     </a-layout>
 

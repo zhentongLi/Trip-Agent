@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
+import random as _random
 import re
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, List, Optional
@@ -103,6 +105,64 @@ class NodeFactory:
         # 0 表示不启用预算限制；正数在每次请求时按 travel_days 动态分配
         self._total_token_budget = total_token_budget
         self._amap_semaphore = asyncio.Semaphore(5)  # AMap API 并发上限
+
+    # ──────────────────────────────────────────
+    # LLM 流式调用 + 延迟监控
+    # ──────────────────────────────────────────
+
+    async def _stream_llm_with_latency(
+        self,
+        llm,
+        messages: list,
+        label: str,
+        semaphore: Optional[asyncio.Semaphore] = None,
+    ) -> str:
+        """用 astream() 调用 LLM，分别记录首 token 延迟（TTFT，反映网络排队）
+        和生成耗时（反映模型推理速度），并在超时或网络错误时自动重试。
+
+        返回完整的响应文本（等价于 ainvoke().content）。
+        """
+        _MAX_RETRIES = 3
+        _RETRY_BASE = 0.8
+        sem = semaphore if semaphore is not None else self._plan_semaphore
+        last_err: Optional[Exception] = None
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                async with sem:
+                    t0 = time.perf_counter()
+                    t_first: Optional[float] = None
+                    chunks: list[str] = []
+
+                    async for chunk in llm.astream(messages):
+                        piece = chunk.content if hasattr(chunk, "content") else str(chunk)
+                        if piece:
+                            if t_first is None:
+                                t_first = time.perf_counter()
+                            chunks.append(piece)
+
+                    t_last = time.perf_counter()
+                    ttft = (t_first - t0) if t_first is not None else (t_last - t0)
+                    gen_time = (t_last - t_first) if t_first is not None else 0.0
+                    logger.info(
+                        f"⏱ [{label}] TTFT={ttft:.2f}s"
+                        f" | 生成={gen_time:.2f}s"
+                        f" | 合计={t_last - t0:.2f}s"
+                    )
+                    return "".join(chunks)
+
+            except Exception as e:
+                last_err = e
+                if attempt >= _MAX_RETRIES or not self._is_retryable_llm_error(e):
+                    raise
+                delay = _RETRY_BASE * (2 ** (attempt - 1)) + _random.uniform(0, 0.25)
+                logger.warning(
+                    f"{label} 流式调用失败（第{attempt}/{_MAX_RETRIES}次）: {e}，"
+                    f"{delay:.2f}s 后重试"
+                )
+                await asyncio.sleep(delay)
+
+        raise last_err  # type: ignore[misc]
 
     # ──────────────────────────────────────────
     # 节点 1：gather（并行调用四个专项 Agent）
@@ -328,12 +388,9 @@ class NodeFactory:
                             content=f"JSON 格式有误（{last_json_err}），请仅输出合法的纯 JSON，不包含任何说明文字。"
                         ),
                     ]
-                response = await self._invoke_with_retry(
-                    lambda m=messages: llm.ainvoke(m),
-                    f"DayPlanner[{day_index + 1}]",
-                    self._plan_semaphore,
+                last_raw = await self._stream_llm_with_latency(
+                    llm, messages, f"DayPlanner[{day_index + 1}]", self._plan_semaphore
                 )
-                last_raw = response.content
                 json_str = extract_json_str(last_raw)
                 data = _json.loads(json_str)
                 # 补全必填字段（防 LLM 遗漏）
@@ -498,15 +555,13 @@ class NodeFactory:
             user_profile_hint=state.get("user_profile_hint"),
         )
         try:
-            response = await self._invoke_with_retry(
-                lambda: llm.ainvoke([
-                    SystemMessage(content=PLANNER_AGENT_PROMPT),
-                    HumanMessage(content=planner_query),
-                ]),
+            content = await self._stream_llm_with_latency(
+                llm,
+                [SystemMessage(content=PLANNER_AGENT_PROMPT), HumanMessage(content=planner_query)],
                 "Planner",
                 self._plan_semaphore,
             )
-            trip_plan = parse_trip_response(response.content, request)
+            trip_plan = parse_trip_response(content, request)
             if trip_plan is None:
                 trip_plan = self._create_fallback_plan(request)
             logger.success("✅ plan 节点完成（整体模式）")
@@ -529,13 +584,14 @@ class NodeFactory:
             return {"trip_plan": None, "error": state.get("error", "行程规划失败")}
 
         primary_city = state["primary_city"]
+        # 先去重，再调 AMap API，避免对即将被移除的景点浪费配额
+        self._dedup_attractions(trip_plan)
+        self._dedup_meals(trip_plan)
         await asyncio.gather(
             self._fix_coordinates_async(trip_plan, primary_city),
             self._enrich_opening_hours_async(trip_plan, primary_city),
         )
         self._add_weather_warnings(trip_plan)
-        self._dedup_attractions(trip_plan)
-        self._dedup_meals(trip_plan)
         logger.success("✅ postprocess 节点完成")
         return {"trip_plan": trip_plan, "error": None}
 
