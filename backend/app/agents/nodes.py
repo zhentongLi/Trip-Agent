@@ -82,12 +82,15 @@ class NodeFactory:
         is_retryable_llm_error: Callable[[Exception], bool],
         build_planner_query: Callable,
         create_fallback_plan: Callable,
+        fast_llm: Optional["ChatOpenAI"] = None,
     ) -> None:
         self._attraction_agent = attraction_agent
         self._weather_agent = weather_agent
         self._hotel_agent = hotel_agent
         self._food_agent = food_agent
         self._llm = llm
+        # 快速模型用于单日并行规划；未传入时回退主 LLM（行为完全向后兼容）
+        self._fast_llm = fast_llm or llm
         self._amap_client = amap_client
         self._invoke_with_retry = invoke_with_retry
         self._is_retryable_llm_error = is_retryable_llm_error
@@ -280,10 +283,14 @@ class NodeFactory:
         day_date: str,
         request: TripRequest,
     ) -> Optional[DayPlan]:
-        """异步调用 LLM 规划单日行程，解析为 DayPlan"""
+        """异步调用 LLM 规划单日行程，解析为 DayPlan。
+
+        使用 fast_llm（Haiku/Flash 类）：单日 JSON 输出短、结构固定，
+        快速模型完全胜任，可降低 50% 以上成本与首字延迟。
+        """
         try:
             response = await self._invoke_with_retry(
-                lambda: self._llm.ainvoke([
+                lambda: self._fast_llm.ainvoke([
                     SystemMessage(content=_SINGLE_DAY_SYSTEM_PROMPT),
                     HumanMessage(content=query),
                 ]),

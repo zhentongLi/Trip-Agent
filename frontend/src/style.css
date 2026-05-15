@@ -2,20 +2,52 @@
    任我行 — Global Dark Tech Styles
    ===================================================== */
 
+:root {
+  /* Brand palette */
+  --brand-primary: #667eea;
+  --brand-secondary: #764ba2;
+  --brand-accent: #a78bfa;
+  --brand-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  --brand-gradient-soft: linear-gradient(135deg, rgba(102,126,234,0.2), rgba(118,75,162,0.2));
+  --brand-glow: 0 0 20px rgba(102,126,234,0.4);
+  --brand-glow-sm: 0 0 10px rgba(102,126,234,0.3);
+
+  /* Surface */
+  --bg-base: #080810;
+  --bg-elevated: #0d0d18;
+  --surface-glass: rgba(255, 255, 255, 0.03);
+  --surface-glass-hover: rgba(255, 255, 255, 0.06);
+  --surface-glass-strong: rgba(255, 255, 255, 0.05);
+
+  /* Borders */
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-brand: rgba(102, 126, 234, 0.2);
+  --border-brand-hover: rgba(102, 126, 234, 0.5);
+
+  /* Text */
+  --text-primary: rgba(255, 255, 255, 0.95);
+  --text-secondary: rgba(255, 255, 255, 0.6);
+  --text-muted: rgba(255, 255, 255, 0.4);
+  --text-faint: rgba(255, 255, 255, 0.25);
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
-html, body, #app {
-  height: 100%;
+html, body {
   min-height: 100%;
 }
 
+#app {
+  min-height: 100vh;
+}
+
 body {
-  background: #080810;
-  color: rgba(255, 255, 255, 0.85);
+  background: var(--bg-base);
+  color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   font-size: 14px;
   line-height: 1.6;
@@ -45,7 +77,8 @@ input, select, textarea {
   font-family: inherit;
 }
 
-input[type="date"]::-webkit-calendar-picker-indicator {
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator {
   filter: invert(0.7);
   cursor: pointer;
 }
@@ -56,7 +89,7 @@ button {
   font-family: inherit;
 }
 
-/* @keyframes for spin used in spinners */
+/* Animations */
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -66,10 +99,20 @@ button {
   50% { opacity: 0.6; }
 }
 
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scan-line {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.8; }
+}
+
 /* Shared dark glass card */
 .glass-card {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(102, 126, 234, 0.15);
+  background: var(--surface-glass);
+  border: 1px solid var(--border-brand);
   border-radius: 16px;
   position: relative;
   overflow: hidden;
@@ -89,4 +132,340 @@ button {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* Section eyebrow label */
+.eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* Grid + Glow background helpers */
+.bg-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(102,126,234,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(102,126,234,0.04) 1px, transparent 1px);
+  background-size: 48px 48px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bg-glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* =====================================================
+   Ant Design Vue — Dark Theme Overrides (global)
+   ===================================================== */
+
+/* Modal */
+.ant-modal-content {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-brand) !important;
+}
+.ant-modal-header {
+  background: transparent !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+}
+.ant-modal-title,
+.ant-modal-close-x {
+  color: var(--text-primary) !important;
+}
+.ant-modal-body {
+  color: var(--text-secondary) !important;
+}
+
+/* Drawer */
+.ant-drawer-content {
+  background: var(--bg-elevated) !important;
+}
+.ant-drawer-header {
+  background: transparent !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+}
+.ant-drawer-title,
+.ant-drawer-close {
+  color: var(--text-primary) !important;
+}
+.ant-drawer-body {
+  color: var(--text-secondary) !important;
+}
+
+/* Form labels */
+.ant-form-item-label > label {
+  color: var(--text-muted) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.5px;
+}
+
+/* Inputs / Number / Password / DatePicker */
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-input-number,
+.ant-input-number-input,
+.ant-input-password,
+.ant-picker,
+.ant-select-selector,
+textarea.ant-input {
+  background: var(--surface-glass-strong) !important;
+  border: 1.5px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+  border-radius: 12px !important;
+  transition: all 0.2s ease;
+}
+.ant-input:hover,
+.ant-input-affix-wrapper:hover,
+.ant-input-number:hover,
+.ant-picker:hover,
+.ant-select:hover .ant-select-selector {
+  border-color: var(--brand-primary) !important;
+}
+.ant-input:focus,
+.ant-input-focused,
+.ant-input-affix-wrapper-focused,
+.ant-input-number-focused,
+.ant-picker-focused,
+.ant-select-focused .ant-select-selector {
+  border-color: var(--brand-primary) !important;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15) !important;
+}
+.ant-input::placeholder,
+.ant-input-number-input::placeholder,
+textarea.ant-input::placeholder {
+  color: var(--text-faint) !important;
+}
+.ant-picker-input > input {
+  color: var(--text-primary) !important;
+}
+.ant-picker-input > input::placeholder {
+  color: var(--text-faint) !important;
+}
+.ant-picker-suffix,
+.ant-picker-clear {
+  color: var(--text-muted) !important;
+}
+
+/* Select dropdown */
+.ant-select-dropdown {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-brand) !important;
+}
+.ant-select-item {
+  color: var(--text-secondary) !important;
+}
+.ant-select-item-option-selected:not(.ant-select-item-option-disabled),
+.ant-select-item-option-active:not(.ant-select-item-option-disabled) {
+  background: rgba(102, 126, 234, 0.15) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Date picker panel */
+.ant-picker-dropdown,
+.ant-picker-panel-container {
+  background: var(--bg-elevated) !important;
+}
+.ant-picker-panel {
+  background: var(--bg-elevated) !important;
+  border-color: var(--border-brand) !important;
+}
+.ant-picker-content th,
+.ant-picker-header,
+.ant-picker-cell {
+  color: var(--text-secondary) !important;
+}
+.ant-picker-cell-in-view {
+  color: var(--text-primary) !important;
+}
+.ant-picker-cell:hover .ant-picker-cell-inner {
+  background: rgba(102, 126, 234, 0.25) !important;
+}
+.ant-picker-cell-selected .ant-picker-cell-inner {
+  background: var(--brand-gradient) !important;
+}
+
+/* Buttons — keep AntD primary using our gradient */
+.ant-btn-primary:not([disabled]) {
+  background: var(--brand-gradient) !important;
+  border: none !important;
+  box-shadow: var(--brand-glow-sm);
+}
+.ant-btn-primary:hover:not([disabled]) {
+  box-shadow: var(--brand-glow);
+  transform: translateY(-1px);
+}
+.ant-btn-default {
+  background: var(--surface-glass-strong) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-secondary) !important;
+}
+.ant-btn-default:hover {
+  background: var(--surface-glass-hover) !important;
+  border-color: var(--border-brand-hover) !important;
+  color: var(--text-primary) !important;
+}
+.ant-btn-link {
+  color: var(--brand-primary) !important;
+}
+.ant-btn-text {
+  color: var(--text-secondary) !important;
+}
+.ant-btn-text:hover {
+  background: var(--surface-glass-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Tag */
+.ant-tag {
+  background: rgba(102, 126, 234, 0.15);
+  border-color: rgba(102, 126, 234, 0.4);
+  color: #a5b4fc;
+}
+
+/* Empty */
+.ant-empty-description {
+  color: var(--text-muted) !important;
+}
+
+/* Switch */
+.ant-switch-checked {
+  background: var(--brand-gradient) !important;
+}
+
+/* Spin */
+.ant-spin-dot-item {
+  background: var(--brand-primary) !important;
+}
+
+/* Dropdown menu */
+.ant-dropdown-menu {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-brand) !important;
+}
+.ant-dropdown-menu-item {
+  color: var(--text-secondary) !important;
+}
+.ant-dropdown-menu-item:hover {
+  background: rgba(102, 126, 234, 0.15) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Menu (used in side nav) */
+.ant-menu {
+  background: transparent !important;
+  color: var(--text-secondary) !important;
+  border-inline-end: none !important;
+}
+.ant-menu-item,
+.ant-menu-submenu-title {
+  color: var(--text-secondary) !important;
+}
+.ant-menu-item:hover,
+.ant-menu-submenu-title:hover {
+  color: var(--text-primary) !important;
+  background: rgba(102, 126, 234, 0.08) !important;
+}
+.ant-menu-item-selected {
+  color: var(--text-primary) !important;
+  background: rgba(102, 126, 234, 0.15) !important;
+}
+
+/* Collapse */
+.ant-collapse {
+  background: transparent !important;
+  border: none !important;
+}
+.ant-collapse > .ant-collapse-item {
+  border-bottom: 1px solid var(--border-subtle) !important;
+}
+.ant-collapse-header {
+  color: var(--text-primary) !important;
+  background: var(--surface-glass) !important;
+}
+.ant-collapse-content {
+  background: rgba(255, 255, 255, 0.015) !important;
+  color: var(--text-secondary) !important;
+  border-top: 1px solid var(--border-subtle) !important;
+}
+
+/* List */
+.ant-list {
+  color: var(--text-secondary) !important;
+}
+.ant-list-item {
+  border-bottom-color: var(--border-subtle) !important;
+}
+
+/* Descriptions */
+.ant-descriptions-item-label {
+  color: var(--text-muted) !important;
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+.ant-descriptions-item-content {
+  color: var(--text-primary) !important;
+}
+.ant-descriptions-bordered .ant-descriptions-item-label,
+.ant-descriptions-bordered .ant-descriptions-item-content {
+  border-color: var(--border-subtle) !important;
+}
+.ant-descriptions-view {
+  border-color: var(--border-subtle) !important;
+}
+
+/* Divider */
+.ant-divider {
+  border-block-start-color: var(--border-subtle) !important;
+  color: var(--text-muted) !important;
+}
+
+/* Card (for any leftover ant-card usage) */
+.ant-card {
+  background: var(--surface-glass) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 14px !important;
+  color: var(--text-primary) !important;
+}
+.ant-card-head {
+  background: transparent !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Progress */
+.ant-progress-text {
+  color: var(--text-secondary) !important;
+}
+
+/* Checkbox */
+.ant-checkbox-wrapper {
+  color: var(--text-secondary) !important;
+}
+.ant-checkbox-inner {
+  background: var(--surface-glass-strong) !important;
+  border-color: var(--border-subtle) !important;
+}
+.ant-checkbox-checked .ant-checkbox-inner {
+  background: var(--brand-primary) !important;
+  border-color: var(--brand-primary) !important;
+}
+
+/* Notification / Message — keep light text on dark */
+.ant-message-notice-content {
+  background: var(--bg-elevated) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-brand);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+}
+
+/* Affix wrapper transparent so menu blends */
+.ant-affix {
+  background: transparent !important;
 }
