@@ -12,7 +12,7 @@ import App from './App.vue'
 import Home from './views/Home.vue'
 import Result from './views/Result.vue'
 
-// 全局暗色基础样式
+// 全局暗色基础样式（必须在 reset.css 之后，覆盖 AntD 默认亮色样式）
 import './style.css'
 
 const router = createRouter({

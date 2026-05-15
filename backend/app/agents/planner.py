@@ -101,10 +101,17 @@ class MultiAgentTripPlanner:
         llm: ChatOpenAI,
         amap_client: AmapRestClient,
         memory_service=None,
+        fast_llm: Optional[ChatOpenAI] = None,
     ) -> None:
         logger.info("🔄 初始化多智能体旅行规划系统（LangGraph）...")
 
         self._llm = llm
+        # fast_llm 用于 NodeFactory 单日并行规划与 adjust_trip；未传入时回退主 LLM
+        self._fast_llm = fast_llm or llm
+        routing_active = self._fast_llm is not self._llm
+        logger.info(
+            f"🔀 LLM 路由：{'启用（推理+快速双模型）' if routing_active else '关闭（仅主模型）'}"
+        )
         self._amap_client = amap_client
         self._memory_service = memory_service
         self._gather_semaphore = asyncio.Semaphore(4)  # gather 阶段：4个 Agent 并发槽
@@ -141,6 +148,7 @@ class MultiAgentTripPlanner:
             hotel_agent=self._hotel_agent,
             food_agent=self._food_agent,
             llm=llm,
+            fast_llm=self._fast_llm,
             amap_client=amap_client,
             invoke_with_retry=self._invoke_with_retry,
             is_retryable_llm_error=_is_retryable_llm_error,
@@ -404,8 +412,9 @@ class MultiAgentTripPlanner:
 
 请直接返回修改后的完整行程 JSON："""
 
+        # 行程调整通常是局部 JSON 修改，使用快速模型；无快速模型时自动回退主 LLM
         response = await self._invoke_with_retry(
-            lambda: self._llm.ainvoke([
+            lambda: self._fast_llm.ainvoke([
                 SystemMessage(content="你是专业的旅行行程修改专家，严格按照用户要求修改 JSON 格式行程。"),
                 HumanMessage(content=adjust_prompt),
             ]),

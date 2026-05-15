@@ -29,18 +29,39 @@
             <a-button type="primary" size="small" style="margin-left:8px" @click="openAuth('register')">注册</a-button>
           </template>
         </div>
-      </a-layout-header>
+      </nav>
 
-      <a-layout-content style="padding: 24px">
-        <router-view />
-      </a-layout-content>
+      <div class="header-spacer" />
 
       <a-layout-footer style="text-align: center">
         通智旅行AI智能规划助手 ©2026
       </a-layout-footer>
     </a-layout>
 
-    <!-- ── 登录/注册弹窗 ──────────────────────────────────────────── -->
+      <template v-if="authState.token">
+        <button class="nav-btn" @click="showCloudTrips = true">☁️ 云端行程</button>
+        <a-dropdown :trigger="['click']">
+          <button class="nav-btn nav-user">
+            👤 {{ authState.username }} ▾
+          </button>
+          <template #overlay>
+            <a-menu @click="handleMenuClick">
+              <a-menu-item key="logout">🚪 退出登录</a-menu-item>
+            </a-menu>
+          </template>
+        </a-dropdown>
+      </template>
+      <template v-else>
+        <button class="nav-btn" @click="openAuth('login')">登录</button>
+        <button class="nav-btn-primary" @click="openAuth('register')">注册</button>
+      </template>
+    </header>
+
+    <main class="app-main">
+      <router-view />
+    </main>
+
+    <!-- ── 登录/注册弹窗 ─────────────────────────────────────────── -->
     <a-modal
       v-model:open="authModalOpen"
       :title="authMode === 'login' ? '🔑 用户登录' : '📝 注册账号'"
@@ -48,7 +69,6 @@
       width="400px"
       @cancel="authModalOpen = false"
     >
-      <!-- 登录表单 -->
       <a-form v-if="authMode === 'login'" :model="loginForm" layout="vertical" @finish="handleLogin">
         <a-form-item label="用户名" name="username" :rules="[{ required: true }]">
           <a-input v-model:value="loginForm.username" placeholder="请输入用户名" />
@@ -62,7 +82,6 @@
         </div>
       </a-form>
 
-      <!-- 注册表单 -->
       <a-form v-else :model="registerForm" layout="vertical" @finish="handleRegister">
         <a-form-item label="用户名" name="username" :rules="[{ required: true, min: 2 }]">
           <a-input v-model:value="registerForm.username" placeholder="2-32个字符" />
@@ -80,7 +99,7 @@
       </a-form>
     </a-modal>
 
-    <!-- ── 云端行程抽屉 ───────────────────────────────────────────── -->
+    <!-- ── 云端行程抽屉 ─────────────────────────────────────────── -->
     <a-drawer
       v-model:open="showCloudTrips"
       title="☁️ 我的云端行程"
@@ -99,7 +118,7 @@
 
         <a-list :data-source="cloudTrips" item-layout="horizontal">
           <template #renderItem="{ item }">
-            <a-list-item>
+            <a-list-item class="cloud-trip-item">
               <a-list-item-meta
                 :title="item.title"
                 :description="`${item.city} · ${item.created_at.slice(0,10)}`"
@@ -128,7 +147,12 @@ import type { SavedTripOut } from '@/types'
 
 const router = useRouter()
 
-// ── Auth 弹窗 ─────────────────────────────────────────────────────────────
+const navLinks = [
+  { to: '/', label: '规划行程' },
+  { to: '/result', label: '我的行程' },
+]
+
+// ── Auth modal ───────────────────────────────────────────────────────────
 const authModalOpen = ref(false)
 const authMode = ref<'login' | 'register'>('login')
 const authLoading = ref(false)
@@ -175,7 +199,11 @@ function handleLogout() {
   message.info('已退出登录')
 }
 
-// ── 云端行程 Drawer ────────────────────────────────────────────────────────
+function handleMenuClick({ key }: { key: string }) {
+  if (key === 'logout') handleLogout()
+}
+
+// ── Cloud trips drawer ────────────────────────────────────────────────────
 const showCloudTrips = ref(false)
 const cloudLoading = ref(false)
 const cloudTrips = ref<SavedTripOut[]>([])
@@ -201,7 +229,6 @@ async function loadCloudDetail(tripId: number) {
     showCloudTrips.value = false
     message.success('行程已加载！')
 
-    // 当前已在结果页时，不走路由重载，改为页面内数据刷新
     if (router.currentRoute.value.path === '/result') {
       window.dispatchEvent(new CustomEvent('trip-plan-updated'))
     } else {
@@ -224,33 +251,183 @@ async function deleteCloud(tripId: number) {
 }
 </script>
 
-<style>
+<style scoped>
 #app {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
-    'Noto Sans', sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-base);
 }
 
+/* ── Header ─────────────────────────────────────────────────────────── */
 .app-header {
+  height: 52px;
+  background: rgba(8, 8, 16, 0.95);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border-brand);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  background: #001529;
-  padding: 0 32px;
+  padding: 0 24px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  flex-shrink: 0;
 }
 
-.header-left .app-title {
-  color: white;
-  font-size: 20px;
-  font-weight: bold;
+.scan-line {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #667eea 40%, #a78bfa 60%, transparent);
+  opacity: 0.5;
+  pointer-events: none;
+  animation: scan-line 3s ease-in-out infinite;
+}
+
+/* Brand */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   cursor: pointer;
-  transition: opacity 0.2s;
+  margin-right: 32px;
+  user-select: none;
 }
-.header-left .app-title:hover { opacity: 0.8; }
+.brand-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--brand-gradient);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  box-shadow: var(--brand-glow);
+}
+.brand-title {
+  color: white;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.brand-badge {
+  font-size: 9px;
+  color: rgba(102, 126, 234, 0.8);
+  border: 1px solid rgba(102, 126, 234, 0.3);
+  border-radius: 4px;
+  padding: 1px 6px;
+  letter-spacing: 1.5px;
+  font-weight: 600;
+}
 
-.header-right { display: flex; align-items: center; gap: 4px; }
+/* Nav links */
+.nav-links {
+  display: flex;
+  height: 100%;
+  align-items: center;
+}
+.nav-link {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-size: 12px;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.35);
+  position: relative;
+  transition: color 0.2s;
+}
+.nav-link:hover { color: var(--text-secondary); }
+.nav-link.active { color: white; }
+.nav-link-active-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--brand-gradient);
+  box-shadow: var(--brand-glow-sm);
+}
 
-.nav-btn { color: rgba(255,255,255,0.85) !important; }
-.nav-btn:hover { color: white !important; background: rgba(255,255,255,0.1) !important; }
+.header-spacer { flex: 1; }
+
+/* AI status pill */
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(52, 199, 89, 0.1);
+  border: 1px solid rgba(52, 199, 89, 0.25);
+  border-radius: 20px;
+  padding: 3px 10px;
+  margin-right: 10px;
+}
+.status-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #34c759;
+  box-shadow: 0 0 6px #34c759;
+}
+.status-pill span {
+  font-size: 10px;
+  color: rgba(52, 199, 89, 0.85);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+/* Header buttons */
+.nav-btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-left: 4px;
+  transition: all 0.18s;
+}
+.nav-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--text-primary);
+}
 .nav-user { font-weight: 500; }
-</style>
 
+.nav-btn-primary {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 8px;
+  background: var(--brand-gradient);
+  border: none;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 6px;
+  box-shadow: var(--brand-glow-sm);
+  transition: all 0.2s;
+}
+.nav-btn-primary:hover {
+  box-shadow: var(--brand-glow);
+  transform: translateY(-1px);
+}
+
+/* Main — 不裁剪溢出，让 Home 页内容撑开 body（body 级滚动） */
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* Cloud trip drawer items */
+.cloud-trip-item :deep(.ant-list-item-meta-title) {
+  color: var(--text-primary) !important;
+}
+.cloud-trip-item :deep(.ant-list-item-meta-description) {
+  color: var(--text-muted) !important;
+}
+</style>

@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cd backend
 
-# Run all tests (~98 test cases)
+
 /opt/anaconda3/envs/trip-agent/bin/python -m pytest tests/ -q
 # or with conda:
 conda run -n trip-agent python -m pytest tests/ -q
@@ -19,6 +19,9 @@ conda run -n trip-agent python -m pytest tests/test_routes.py -q
 
 # Run a single test by name
 conda run -n trip-agent python -m pytest tests/test_routes.py::TestTripAdjust::test_adjust_rejects_empty_message -q
+
+# Run just the parallel planner tests (fastest signal for plan-node changes)
+conda run -n trip-agent python -m pytest tests/test_parallel_planner.py tests/test_compressor.py -q
 
 # Start development server (requires .env with JWT_SECRET_KEY)
 /opt/anaconda3/envs/trip-agent/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
@@ -61,26 +64,20 @@ app/
 │       ├── share.py     # Share link management — uses Depends(get_share_store) + async methods
 │       ├── auth.py      # JWT auth
 │       ├── user.py      # Cloud trip CRUD
-│       └── map.py       # AMap POI/weather/route utilities
+│       ├── map.py       # AMap POI/weather/route utilities
+│       └── booking.py   # /api/booking/* — affiliate jump links (Ctrip/Meituan/Feizhu/Damai)
+│                        #   Phase-2 placeholder for Amadeus/Ctrip realtime price APIs
 ├── agents/              # LangGraph multi-agent system
 │   ├── planner.py       # MultiAgentTripPlanner — plan_trip_stream, plan_trip, adjust_trip
 │   │                    #   Two semaphores: _gather_semaphore(4) and _plan_semaphore(4)
 │   │                    #   Cache read/write uses await cache.aget/aset (async-aware)
+│   │                    #   Constructor injects MemoryService → user_profile_hint
+│   │                    #   _llm_call_semaphore = 3 (supports 3-way parallel day planning)
 │   ├── nodes.py         # NodeFactory — gather / plan / postprocess LangGraph nodes
-│   │                    #   _stream_llm_with_latency(): streams plan-phase LLM calls,
-│   │                    #   logs TTFT (network queuing) and generation time separately
-│   ├── preprocessor.py  # preprocess_responses(): 3-step gather output cleaning
-│   │                    #   1. quality filter (_FAILURE_PATTERNS, min 20 chars)
-│   │                    #   2. exact dedup (MD5 hash)
-│   │                    #   3. Jaccard similarity dedup (threshold 0.85)
-│   ├── token_budget.py  # allocate(total, days) → BudgetPlan(frozen dataclass)
-│   │                    #   Proportional allocation by complexity weight per task type
-│   │                    #   gather=0.03, day_plan=0.20, full_plan_per_day=0.28
-│   ├── compressor.py    # compress_agent_responses() — rule-based (no LLM) context compression
-│   │                    #   POI: ~50-55% reduction; weather: ~55-60%; overall: ~60-70%
+
 │   ├── parsers.py       # extract_json_str, parse_trip_response, parse_adjust_response
-│   ├── prompts.py       # All 5 agent system prompts
-│   ├── state.py         # PlannerState TypedDict
+│   ├── prompts.py       # All 5 agent system prompts + _SINGLE_DAY_SYSTEM_PROMPT (in nodes.py)
+│   ├── state.py         # PlannerState TypedDict (includes user_profile_hint field)
 │   ├── tools.py         # make_amap_tools(client) → (search_places_tool, get_weather_tool)
 │   └── trip_planner_agent.py  # ← compatibility shim only; do not add logic here
 ├── dependencies.py      # ALL FastAPI Depends() factories — single source of truth
@@ -126,28 +123,13 @@ app/
 ```
 START → gather → plan → postprocess → END
 
-gather:      NodeFactory.gather() — asyncio.gather() up to 2N+2 agents in parallel
-             Attraction × N cities, Weather × N cities, Hotel, Food (max N=3)
-             Output passed through preprocess_responses() before being stored in state
-             _gather_semaphore(4) limits concurrent LLM slots
 
-plan:        NodeFactory.plan() — tries parallel per-day mode first, falls back to single call
-             Per-day: N tasks via asyncio.gather(), each calls _stream_llm_with_latency()
-             which logs TTFT + generation time; JSON parse errors retry up to 2×
-             Token budget allocated via allocate(total_budget, travel_days) → BudgetPlan
-             _plan_semaphore(4) limits concurrent LLM slots
-             Fallback: _plan_single_call() — one LLM call for full itinerary JSON
-
-postprocess: NodeFactory.postprocess() — order matters:
-             1. _dedup_attractions()     → cross-day exact + Jaccard dedup (before API calls)
-             2. _dedup_meals()           → cross-day per-meal-type restaurant dedup
-             3. _fix_coordinates_async() → AmapRestClient.geocode() (concurrent, Semaphore(5))
-             4. _enrich_opening_hours()  → AmapRestClient.get_opening_hours() (concurrent)
-             5. _add_weather_warnings()  → regex on weather strings
              → writes result to RedisCache / TTLCache
 ```
 
-`plan_trip_stream()` accepts a `cache` parameter. Pass via `Depends(get_trip_cache)`. Cache reads/writes use `await cache.aget/aset` — both `TTLCache` and `RedisCache` implement this interface.
+**Performance note:** plan node wall-clock time is now ~O(single_day) instead of ~O(N × single_day). A 2-day trip drops from ~2 min to ~50-70s; 5-day from ~5 min to ~2 min (3-way semaphore bounds concurrency).
+
+`plan_trip_stream()` accepts `cache` and `session_id` parameters. Pass via `Depends(get_trip_cache)`. Cache reads/writes use `await cache.aget/aset` — both `TTLCache` and `RedisCache` implement this interface. When `session_id` is provided AND `MemoryService` is wired in, `user_profile_hint` is injected into Planner prompt, and a turn is recorded after success.
 
 ### Dependency Injection Pattern
 
@@ -188,6 +170,7 @@ Two auth dependency factories are provided in `app/dependencies.py`:
 | `/trip/plan`, `/trip/plan/stream`, `/trip/adjust` | Optional | Anonymous users allowed |
 | `/guide/ask`, `/guide/skill/*` | Optional | Anonymous users allowed |
 | `GET /trip/share/{id}`, `POST /trip/share` | Anonymous | POST records creator_id if logged in |
+| `GET /api/booking/{attraction,hotel}/links` | Anonymous | Returns affiliate jump URLs |
 
 **Error types** (in `app/errors/types.py`):
 - `AuthenticationError` → HTTP 401, `error_code="AUTHENTICATION_ERROR"`
@@ -291,7 +274,8 @@ Backend `.env`:
 AMAP_API_KEY=<Web Service Key>
 LLM_API_KEY=<your key>
 LLM_BASE_URL=https://<openai-compatible>/v1
-LLM_MODEL_ID=<model>
+LLM_MODEL_ID=<model>          # IMPORTANT: code reads LLM_MODEL_ID first, then LLM_MODEL/OPENAI_MODEL.
+                              # Misnaming this var causes the planner to fall back to "gpt-4" → 404
 JWT_SECRET_KEY=<secret>
 
 # Optional
@@ -309,7 +293,19 @@ TRIP_CACHE_TTL_SECONDS=3600
 SHARE_TTL_SECONDS=604800
 RAG_RERANK_TTL_SECONDS=86400
 CIRCUIT_BREAKER_REDIS_ENABLED=false      # opt-in distributed circuit breaker
+PLANNER_COMPRESS_CONTEXT=true            # toggle compressor.py (default on; saves 60-70% planner tokens)
+
+# LLM 双模型路由（all optional — 未设置时所有任务走 LLM_MODEL_ID）
+LLM_FAST_MODEL_ID=glm-flash              # 快速模型用于单日并行规划、行程调整等短输出任务
+LLM_FAST_API_KEY=<key>                   # 可选 — 若与主模型不同 provider
+LLM_FAST_BASE_URL=https://...            # 可选 — 若与主模型不同 endpoint
+LLM_ROUTING_ENABLED=true                 # 默认 true；设为 false 时全部任务走主模型
 ```
+
+**LLM Router Behavior** (`backend/app/dependencies.py`):
+- `get_llm()` → reasoning model (used by RAG, `adjust_trip` fallback, `_plan_single_call`)
+- `get_fast_llm()` → fast/cheap model (used by `NodeFactory._plan_single_day_async`, `adjust_trip` primary path). Falls back to `get_llm()` instance when `LLM_FAST_MODEL_ID` unset or `LLM_ROUTING_ENABLED=false`.
+- Test override: `app.dependency_overrides[get_fast_llm] = lambda: MagicMock()`
 
 Frontend `.env`:
 ```env
@@ -332,3 +328,14 @@ VITE_AMAP_SECURITY_CODE=<security code>
 - Tests run without Redis — all Redis paths fall back to local; do not set `REDIS_URL` in test environment
 - `validate_skill_flow.py` — skills integration smoke test (not part of pytest suite)
 - `evaluate_rag.py` — standalone RAG eval CLI, not run by default pytest
+- `test_parallel_planner.py` — covers NodeFactory parallel-day helpers; uses `AsyncMock` for `_invoke_with_retry` (no real LLM calls)
+
+## Frontend Notes (`frontend/src/`)
+
+- **Vue 3 + TypeScript + Vite**, UI library: Ant Design Vue (`a-button`, `a-space`, …)
+- `services/api.ts` — backend client; `generateTripPlanStream()` parses SSE events
+- `services/booking.ts` — affiliate URL builders for attractions (Ctrip/Meituan/Damai/Lvmama) and hotels (Ctrip/Feizhu/Meituan/Elong); `openBookingLink()` opens in new tab with `noopener,noreferrer`
+- `services/toast.ts` — global toast notification service
+- `views/Result.vue` — itinerary display; each attraction/hotel card has booking jump buttons calling `getAttractionLinks()` / `getHotelLinks()`
+
+When extending the frontend with new booking platforms, add the URL builder in `services/booking.ts` first, then thread it through the card template — never hardcode URLs inside the view.

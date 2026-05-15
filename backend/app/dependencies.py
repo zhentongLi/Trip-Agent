@@ -115,7 +115,10 @@ def get_async_redis() -> Optional["AsyncRedis"]:
 
 @lru_cache()
 def get_llm() -> ChatOpenAI:
-    """LLM 客户端（进程级单例）"""
+    """主 LLM 客户端 — 推理模型，用于 Planner 整体回退路径、RAG、调整等高复杂度任务。
+
+    进程级单例。环境变量优先级：LLM_MODEL_ID > LLM_MODEL > OPENAI_MODEL > settings.openai_model。
+    """
     settings = get_settings()
     api_key = (
         os.environ.get("LLM_API_KEY")
@@ -128,13 +131,50 @@ def get_llm() -> ChatOpenAI:
         or settings.openai_base_url
     )
     model = (
-        os.environ.get("LLM_MODEL")
+        os.environ.get("LLM_MODEL_ID")
+        or os.environ.get("LLM_MODEL")
         or os.environ.get("OPENAI_MODEL")
         or settings.openai_model
     )
     from loguru import logger
-    logger.success(f"✅ LLM 初始化 | model={model} | base_url={base_url}")
+    logger.success(f"✅ 主 LLM 初始化 | model={model} | base_url={base_url}")
     return ChatOpenAI(model=model, api_key=api_key, base_url=base_url)
+
+
+@lru_cache()
+def get_fast_llm() -> ChatOpenAI:
+    """快速 LLM 客户端 — Haiku/Flash 级模型，用于单日并行规划等短输出任务。
+
+    进程级单例。环境变量未设置或路由关闭时，自动回退为主 LLM 实例（行为完全向后兼容）。
+
+    优先级：
+      - LLM_FAST_MODEL_ID 未设置 或 LLM_ROUTING_ENABLED=false → 返回 get_llm() 单例
+      - 否则：LLM_FAST_API_KEY/LLM_FAST_BASE_URL 未设置时复用主 LLM 的 key/base_url
+    """
+    settings = get_settings()
+    fast_model = os.environ.get("LLM_FAST_MODEL_ID") or settings.llm_fast_model
+
+    if not settings.llm_routing_enabled or not fast_model:
+        # 关闭路由 或 未配置快速模型 → 复用主 LLM 实例（不创建新 client）
+        return get_llm()
+
+    api_key = (
+        os.environ.get("LLM_FAST_API_KEY")
+        or settings.llm_fast_api_key
+        or os.environ.get("LLM_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or settings.openai_api_key
+    )
+    base_url = (
+        os.environ.get("LLM_FAST_BASE_URL")
+        or settings.llm_fast_base_url
+        or os.environ.get("LLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or settings.openai_base_url
+    )
+    from loguru import logger
+    logger.success(f"⚡ 快速 LLM 初始化 | model={fast_model} | base_url={base_url}")
+    return ChatOpenAI(model=fast_model, api_key=api_key, base_url=base_url)
 
 
 @lru_cache()
@@ -172,10 +212,17 @@ def get_amap_client() -> AmapRestClient:
 
 @lru_cache()
 def get_trip_planner() -> MultiAgentTripPlanner:
-    """多智能体行程规划器（进程级单例）"""
+    """多智能体行程规划器（进程级单例）。
+
+    注入两路 LLM：
+      - llm       : 推理模型（用于整体规划回退、行程调整等高质量任务）
+      - fast_llm  : 快速模型（用于并行逐日单 JSON 生成等短输出任务）
+    fast_llm 未配置时自动复用 llm 实例（向后兼容）。
+    """
     from .services.memory_service import get_memory_service as _get_memory
     return MultiAgentTripPlanner(
         llm=get_llm(),
+        fast_llm=get_fast_llm(),
         amap_client=get_amap_client(),
         memory_service=_get_memory(),
     )

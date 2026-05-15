@@ -95,6 +95,8 @@ class NodeFactory:
         self._hotel_agent = hotel_agent
         self._food_agent = food_agent
         self._llm = llm
+        # 快速模型用于单日并行规划；未传入时回退主 LLM（行为完全向后兼容）
+        self._fast_llm = fast_llm or llm
         self._amap_client = amap_client
         self._invoke_with_retry = invoke_with_retry
         self._is_retryable_llm_error = is_retryable_llm_error
