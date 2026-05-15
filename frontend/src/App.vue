@@ -1,36 +1,42 @@
 <template>
   <div id="app">
-    <!-- ── Dark tech top navigation ─────────────────────────────────── -->
-    <header class="app-header">
-      <!-- scan line glow -->
-      <div class="scan-line" />
-
-      <div class="brand" @click="$router.push('/')">
-        <div class="brand-icon">🌍</div>
-        <span class="brand-title">任我行</span>
-        <span class="brand-badge">AI</span>
-      </div>
-
-      <nav class="nav-links">
-        <div
-          v-for="item in navLinks"
-          :key="item.to"
-          class="nav-link"
-          :class="{ active: $route.path === item.to }"
-          @click="$router.push(item.to)"
-        >
-          <span class="nav-link-active-bar" v-if="$route.path === item.to" />
-          {{ item.label }}
+    <a-layout style="min-height: 100vh">
+      <!-- 顶部导航栏 -->
+      <a-layout-header class="app-header">
+        <div class="header-left">
+          <span class="app-title" @click="$router.push('/')">🌍 通智旅行AI智能规划助手</span>
+        </div>
+        <div class="header-right">
+          <!-- 已登录 -->
+          <template v-if="authState.token">
+            <a-button type="text" class="nav-btn" @click="showCloudTrips = true">
+              ☁️ 云端行程
+            </a-button>
+            <a-dropdown>
+              <a-button type="text" class="nav-btn nav-user">
+                👤 {{ authState.username }} ▾
+              </a-button>
+              <template #overlay>
+                <a-menu>
+                  <a-menu-item @click="handleLogout">🚪 退出登录</a-menu-item>
+                </a-menu>
+              </template>
+            </a-dropdown>
+          </template>
+          <!-- 未登录 -->
+          <template v-else>
+            <a-button type="text" class="nav-btn" @click="openAuth('login')">登录</a-button>
+            <a-button type="primary" size="small" style="margin-left:8px" @click="openAuth('register')">注册</a-button>
+          </template>
         </div>
       </nav>
 
       <div class="header-spacer" />
 
-      <!-- AI status pill -->
-      <div class="status-pill">
-        <div class="status-dot" />
-        <span>AI 在线</span>
-      </div>
+      <a-layout-footer style="text-align: center">
+        通智旅行AI智能规划助手 ©2026
+      </a-layout-footer>
+    </a-layout>
 
       <template v-if="authState.token">
         <button class="nav-btn" @click="showCloudTrips = true">☁️ 云端行程</button>

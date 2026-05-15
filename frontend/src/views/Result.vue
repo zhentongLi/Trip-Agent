@@ -115,15 +115,13 @@
           <div id="amap-container" class="amap-container"></div>
         </div>
 
-        <!-- Daily itinerary -->
-        <div class="days-card glass-card">
-          <div class="card-title">📅 每日行程</div>
-          <div class="days-list">
-            <div
-              v-for="(day, idx) in tripPlan.days"
-              :key="idx"
-              :id="`day-${idx}`"
-              class="day-block"
+        <!-- 每日行程:可折叠 -->
+        <a-card title="📅 每日行程" :bordered="false" class="days-card">
+          <a-collapse v-model:activeKey="activeDays">
+            <a-collapse-panel
+              v-for="(day, index) in tripPlan.days"
+              :key="index"
+              :id="`day-${index}`"
             >
               <div
                 class="day-head"
@@ -495,7 +493,7 @@ const editMode = ref(false)
 const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
 const activeSection = ref('overview')
-const activeDays = ref<number[]>([0])
+const activeDays = ref<number[]>([])
 const sharing = ref(false)
 const saving = ref(false)
 const showAdjustDrawer = ref(false)
@@ -563,6 +561,7 @@ const loadPlanData = async () => {
   if (map) { map.destroy(); map = null }
 
   if (tripPlan.value) {
+    activeDays.value = tripPlan.value.days.map((_, i) => i)
     await loadAttractionPhotos()
     await nextTick()
     await initMap()

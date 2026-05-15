@@ -233,9 +233,7 @@ class TestPlanSingleDayAsync:
     @pytest.mark.asyncio
     async def test_success_returns_day_plan(self):
         factory = _make_factory()
-        mock_resp = MagicMock()
-        mock_resp.content = self._make_day_json(0, "2026-06-01")
-        factory._invoke_with_retry = AsyncMock(return_value=mock_resp)
+        factory._stream_llm_with_latency = AsyncMock(return_value=self._make_day_json(0, "2026-06-01"))
 
         result = await factory._plan_single_day_async(
             "test_query", 0, "2026-06-01", _make_request()
@@ -247,9 +245,7 @@ class TestPlanSingleDayAsync:
     @pytest.mark.asyncio
     async def test_invalid_json_returns_none(self):
         factory = _make_factory()
-        mock_resp = MagicMock()
-        mock_resp.content = "不是JSON数据"
-        factory._invoke_with_retry = AsyncMock(return_value=mock_resp)
+        factory._stream_llm_with_latency = AsyncMock(return_value="不是JSON数据")
 
         result = await factory._plan_single_day_async(
             "test_query", 0, "2026-06-01", _make_request()
@@ -259,7 +255,7 @@ class TestPlanSingleDayAsync:
     @pytest.mark.asyncio
     async def test_invoke_exception_returns_none(self):
         factory = _make_factory()
-        factory._invoke_with_retry = AsyncMock(side_effect=RuntimeError("LLM error"))
+        factory._stream_llm_with_latency = AsyncMock(side_effect=RuntimeError("LLM error"))
 
         result = await factory._plan_single_day_async(
             "test_query", 0, "2026-06-01", _make_request()

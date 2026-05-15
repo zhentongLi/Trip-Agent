@@ -8,19 +8,23 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
+import random as _random
 import re
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, List, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from loguru import logger
 
 from ..models.schemas import Budget, DayPlan, Location, TripPlan, TripRequest, WeatherInfo
 from ..services.amap_rest_client import AmapRestClient
 from .parsers import extract_json_str, parse_trip_response
+from .preprocessor import is_valid_response, preprocess_responses
 from .prompts import PLANNER_AGENT_PROMPT
 from .state import PlannerState
+from .token_budget import BudgetPlan, allocate as allocate_token_budget
 
 if TYPE_CHECKING:
     from langchain_openai import ChatOpenAI
@@ -82,7 +86,9 @@ class NodeFactory:
         is_retryable_llm_error: Callable[[Exception], bool],
         build_planner_query: Callable,
         create_fallback_plan: Callable,
-        fast_llm: Optional["ChatOpenAI"] = None,
+        gather_semaphore: Optional[asyncio.Semaphore] = None,
+        plan_semaphore: Optional[asyncio.Semaphore] = None,
+        total_token_budget: int = 0,
     ) -> None:
         self._attraction_agent = attraction_agent
         self._weather_agent = weather_agent
@@ -96,6 +102,69 @@ class NodeFactory:
         self._is_retryable_llm_error = is_retryable_llm_error
         self._build_planner_query = build_planner_query
         self._create_fallback_plan = create_fallback_plan
+        self._gather_semaphore = gather_semaphore
+        self._plan_semaphore = plan_semaphore
+        # 0 表示不启用预算限制；正数在每次请求时按 travel_days 动态分配
+        self._total_token_budget = total_token_budget
+        self._amap_semaphore = asyncio.Semaphore(5)  # AMap API 并发上限
+
+    # ──────────────────────────────────────────
+    # LLM 流式调用 + 延迟监控
+    # ──────────────────────────────────────────
+
+    async def _stream_llm_with_latency(
+        self,
+        llm,
+        messages: list,
+        label: str,
+        semaphore: Optional[asyncio.Semaphore] = None,
+    ) -> str:
+        """用 astream() 调用 LLM，分别记录首 token 延迟（TTFT，反映网络排队）
+        和生成耗时（反映模型推理速度），并在超时或网络错误时自动重试。
+
+        返回完整的响应文本（等价于 ainvoke().content）。
+        """
+        _MAX_RETRIES = 3
+        _RETRY_BASE = 0.8
+        sem = semaphore if semaphore is not None else self._plan_semaphore
+        last_err: Optional[Exception] = None
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                async with sem:
+                    t0 = time.perf_counter()
+                    t_first: Optional[float] = None
+                    chunks: list[str] = []
+
+                    async for chunk in llm.astream(messages):
+                        piece = chunk.content if hasattr(chunk, "content") else str(chunk)
+                        if piece:
+                            if t_first is None:
+                                t_first = time.perf_counter()
+                            chunks.append(piece)
+
+                    t_last = time.perf_counter()
+                    ttft = (t_first - t0) if t_first is not None else (t_last - t0)
+                    gen_time = (t_last - t_first) if t_first is not None else 0.0
+                    logger.info(
+                        f"⏱ [{label}] TTFT={ttft:.2f}s"
+                        f" | 生成={gen_time:.2f}s"
+                        f" | 合计={t_last - t0:.2f}s"
+                    )
+                    return "".join(chunks)
+
+            except Exception as e:
+                last_err = e
+                if attempt >= _MAX_RETRIES or not self._is_retryable_llm_error(e):
+                    raise
+                delay = _RETRY_BASE * (2 ** (attempt - 1)) + _random.uniform(0, 0.25)
+                logger.warning(
+                    f"{label} 流式调用失败（第{attempt}/{_MAX_RETRIES}次）: {e}，"
+                    f"{delay:.2f}s 后重试"
+                )
+                await asyncio.sleep(delay)
+
+        raise last_err  # type: ignore[misc]
 
     # ──────────────────────────────────────────
     # 节点 1：gather（并行调用四个专项 Agent）
@@ -125,11 +194,12 @@ class NodeFactory:
                 result = await self._invoke_with_retry(
                     lambda: agent.ainvoke({"messages": [HumanMessage(content=query)]}),
                     f"Agent[{label}]",
+                    self._gather_semaphore,
                 )
                 return result["messages"][-1].content
             except Exception as e:
                 logger.warning(f"Agent [{label}] 调用异常: {e}")
-                return f"暂无{label}数据"
+                return ""
 
         all_tasks = [
             *[
@@ -152,30 +222,43 @@ class NodeFactory:
         food_result = all_results[2 * n + 1]
 
         def _safe(r, label: str = "") -> str:
+            """异常转空串；质量过低的响应也过滤掉"""
             if isinstance(r, Exception):
                 logger.warning(f"并行任务异常 [{label}]: {r}")
-                return f"暂无{label}数据"
-            return str(r)
+                return ""
+            text = str(r)
+            if not is_valid_response(text):
+                logger.warning(f"Agent [{label}] 响应质量不足，已过滤")
+                return ""
+            return text
+
+        def _build_multi_city(results, city_list: List[str], kind: str) -> str:
+            parts = []
+            for i, r in enumerate(results):
+                text = _safe(r, f"{city_list[i]}{kind}")
+                if text:
+                    parts.append(f"【{city_list[i]}{kind}信息】\n{text}")
+                else:
+                    logger.warning(f"城市 {city_list[i]} {kind}数据无效，跳过")
+            # 对多城市同类响应做精确去重 + 相似去重（跨城市幂等保护）
+            return "\n\n".join(preprocess_responses(parts)) if parts else f"暂无{kind}数据"
 
         if len(cities) > 1:
-            attraction_response = "\n\n".join(
-                f"【{cities[i]}景点信息】\n{_safe(r, f'{cities[i]}景点')}"
-                for i, r in enumerate(attraction_results)
-            )
-            weather_response = "\n\n".join(
-                f"【{cities[i]}天气信息】\n{_safe(r, f'{cities[i]}天气')}"
-                for i, r in enumerate(weather_results)
-            )
+            attraction_response = _build_multi_city(attraction_results, cities[:n], "景点")
+            weather_response = _build_multi_city(weather_results, cities[:n], "天气")
         else:
-            attraction_response = _safe(attraction_results[0], "景点")
-            weather_response = _safe(weather_results[0], "天气")
+            attraction_response = _safe(attraction_results[0], "景点") or "暂无景点数据"
+            weather_response = _safe(weather_results[0], "天气") or "暂无天气数据"
+
+        hotel_response = _safe(hotel_result, "酒店") or "暂无酒店数据"
+        food_response = _safe(food_result, "餐饮") or "暂无餐饮数据"
 
         logger.success(f"✅ gather 节点完成（{len(all_tasks)} 个并行任务）")
         return {
             "attraction_response": attraction_response,
             "weather_response": weather_response,
-            "hotel_response": _safe(hotel_result, "酒店"),
-            "food_response": _safe(food_result, "餐饮"),
+            "hotel_response": hotel_response,
+            "food_response": food_response,
         }
 
     # ──────────────────────────────────────────
@@ -282,35 +365,59 @@ class NodeFactory:
         day_index: int,
         day_date: str,
         request: TripRequest,
+        budget: Optional[BudgetPlan] = None,
     ) -> Optional[DayPlan]:
-        """异步调用 LLM 规划单日行程，解析为 DayPlan。
+        """异步调用 LLM 规划单日行程，解析为 DayPlan。JSON 解析失败时最多重试 2 次。"""
+        _MAX_JSON_RETRIES = 2
+        last_raw: str = ""
+        last_json_err: str = ""
+        # 按预算计划绑定 max_tokens；未配置预算时使用原始 LLM
+        llm = (
+            self._llm.bind(max_tokens=budget.day_plan)
+            if budget else self._llm
+        )
 
-        使用 fast_llm（Haiku/Flash 类）：单日 JSON 输出短、结构固定，
-        快速模型完全胜任，可降低 50% 以上成本与首字延迟。
-        """
-        try:
-            response = await self._invoke_with_retry(
-                lambda: self._fast_llm.ainvoke([
+        for attempt in range(1, _MAX_JSON_RETRIES + 2):
+            try:
+                messages: list = [
                     SystemMessage(content=_SINGLE_DAY_SYSTEM_PROMPT),
                     HumanMessage(content=query),
-                ]),
-                f"DayPlanner[{day_index + 1}]",
-            )
-            raw = response.content
-            json_str = extract_json_str(raw)
-            data = _json.loads(json_str)
-            # 补全必填字段（防 LLM 遗漏）
-            data.setdefault("date", day_date)
-            data.setdefault("day_index", day_index)
-            data.setdefault("transportation", request.transportation)
-            data.setdefault("accommodation", request.accommodation)
-            data.setdefault("description", f"第{day_index + 1}天行程")
-            day_plan = DayPlan.model_validate(data)
-            logger.success(f"✅ 第{day_index + 1}天行程规划完成")
-            return day_plan
-        except Exception as e:
-            logger.warning(f"⚠️ 第{day_index + 1}天规划失败: {e}")
-            return None
+                ]
+                if attempt > 1 and last_raw:
+                    messages += [
+                        AIMessage(content=last_raw),
+                        HumanMessage(
+                            content=f"JSON 格式有误（{last_json_err}），请仅输出合法的纯 JSON，不包含任何说明文字。"
+                        ),
+                    ]
+                last_raw = await self._stream_llm_with_latency(
+                    llm, messages, f"DayPlanner[{day_index + 1}]", self._plan_semaphore
+                )
+                json_str = extract_json_str(last_raw)
+                data = _json.loads(json_str)
+                # 补全必填字段（防 LLM 遗漏）
+                data.setdefault("date", day_date)
+                data.setdefault("day_index", day_index)
+                data.setdefault("transportation", request.transportation)
+                data.setdefault("accommodation", request.accommodation)
+                data.setdefault("description", f"第{day_index + 1}天行程")
+                day_plan = DayPlan.model_validate(data)
+                logger.success(f"✅ 第{day_index + 1}天行程规划完成")
+                return day_plan
+
+            except (_json.JSONDecodeError, ValueError) as e:
+                last_json_err = str(e)
+                if attempt <= _MAX_JSON_RETRIES:
+                    logger.warning(
+                        f"⚠️ 第{day_index + 1}天JSON解析失败（第{attempt}次），重试: {e}"
+                    )
+                    continue
+                logger.warning(f"⚠️ 第{day_index + 1}天规划失败: {e}")
+                return None
+
+            except Exception as e:
+                logger.warning(f"⚠️ 第{day_index + 1}天规划失败: {e}")
+                return None
 
     # ──────────────────────────────────────────
     # 节点 2：plan（并行逐日 LLM 规划）
@@ -321,6 +428,14 @@ class NodeFactory:
         request: TripRequest = state["request"]
         cities: List[str] = state["cities"]
         total_days = request.travel_days
+
+        # 按行程天数动态分配 token 预算（total_token_budget=0 表示不启用）
+        budget: Optional[BudgetPlan] = (
+            allocate_token_budget(self._total_token_budget, total_days)
+            if self._total_token_budget > 0 else None
+        )
+        if budget:
+            logger.debug(f"Token预算: {budget}")
 
         # ── 尝试并行逐日规划 ──
         try:
@@ -371,7 +486,7 @@ class NodeFactory:
                     total_days=total_days,
                     prev_city=prev_city,
                 )
-                tasks.append(self._plan_single_day_async(query, i, day_date, request))
+                tasks.append(self._plan_single_day_async(query, i, day_date, request, budget))
 
             logger.info(f"🚀 并行规划 {total_days} 天行程...")
             day_results: List[Optional[DayPlan]] = await asyncio.gather(*tasks)
@@ -421,11 +536,17 @@ class NodeFactory:
             logger.warning(f"⚠️ 并行规划异常，回退整体模式: {parallel_err}")
 
         # ── 回退：整体一次性 LLM 规划 ──
-        return await self._plan_single_call(state)
+        return await self._plan_single_call(state, budget)
 
-    async def _plan_single_call(self, state: PlannerState) -> dict:
+    async def _plan_single_call(
+        self, state: PlannerState, budget: Optional[BudgetPlan] = None
+    ) -> dict:
         """回退方案：整体一次 LLM 调用生成全程 JSON"""
         request: TripRequest = state["request"]
+        llm = (
+            self._llm.bind(max_tokens=budget.full_plan)
+            if budget else self._llm
+        )
         planner_query = self._build_planner_query(
             request,
             state["attraction_response"],
@@ -436,14 +557,13 @@ class NodeFactory:
             user_profile_hint=state.get("user_profile_hint"),
         )
         try:
-            response = await self._invoke_with_retry(
-                lambda: self._llm.ainvoke([
-                    SystemMessage(content=PLANNER_AGENT_PROMPT),
-                    HumanMessage(content=planner_query),
-                ]),
+            content = await self._stream_llm_with_latency(
+                llm,
+                [SystemMessage(content=PLANNER_AGENT_PROMPT), HumanMessage(content=planner_query)],
                 "Planner",
+                self._plan_semaphore,
             )
-            trip_plan = parse_trip_response(response.content, request)
+            trip_plan = parse_trip_response(content, request)
             if trip_plan is None:
                 trip_plan = self._create_fallback_plan(request)
             logger.success("✅ plan 节点完成（整体模式）")
@@ -466,6 +586,9 @@ class NodeFactory:
             return {"trip_plan": None, "error": state.get("error", "行程规划失败")}
 
         primary_city = state["primary_city"]
+        # 先去重，再调 AMap API，避免对即将被移除的景点浪费配额
+        self._dedup_attractions(trip_plan)
+        self._dedup_meals(trip_plan)
         await asyncio.gather(
             self._fix_coordinates_async(trip_plan, primary_city),
             self._enrich_opening_hours_async(trip_plan, primary_city),
@@ -479,7 +602,7 @@ class NodeFactory:
     # ──────────────────────────────────────────
 
     async def _fix_coordinates_async(self, trip_plan: TripPlan, city: str) -> None:
-        """并发修正所有景点经纬度坐标"""
+        """并发修正所有景点经纬度坐标（受 AMap 信号量限流）"""
         attractions = [
             (attraction, day)
             for day in trip_plan.days
@@ -489,10 +612,11 @@ class NodeFactory:
         if not attractions:
             return
 
-        tasks = [
-            self._amap_client.geocode_async(attr.address, city)
-            for attr, _ in attractions
-        ]
+        async def _geocode(attr):
+            async with self._amap_semaphore:
+                return await self._amap_client.geocode_async(attr.address, city)
+
+        tasks = [_geocode(attr) for attr, _ in attractions]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for (attraction, _), result in zip(attractions, results):
@@ -561,7 +685,7 @@ class NodeFactory:
                 logger.warning(f"🚨 {weather.date} 天气预警: {weather.weather_warning}")
 
     async def _enrich_opening_hours_async(self, trip_plan: TripPlan, city: str) -> None:
-        """并发获取所有景点真实开放时间"""
+        """并发获取所有景点真实开放时间（受 AMap 信号量限流）"""
         attractions = [
             attraction
             for day in trip_plan.days
@@ -570,10 +694,11 @@ class NodeFactory:
         if not attractions:
             return
 
-        tasks = [
-            self._amap_client.get_opening_hours_async(attr.name, city)
-            for attr in attractions
-        ]
+        async def _get_hours(attr):
+            async with self._amap_semaphore:
+                return await self._amap_client.get_opening_hours_async(attr.name, city)
+
+        tasks = [_get_hours(attr) for attr in attractions]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for attraction, result in zip(attractions, results):
@@ -591,3 +716,50 @@ class NodeFactory:
                 if opentime:
                     attraction.opening_hours = opentime
                     logger.debug(f"🕐 {attraction.name} 开放时间: {opentime}")
+
+    def _dedup_attractions(self, trip_plan: TripPlan) -> None:
+        """跨天景点去重：同名景点仅保留首次出现（精确匹配 + Jaccard > 0.85 相似匹配）"""
+        from .preprocessor import _jaccard  # 局部引用避免循环
+        seen_names: list[str] = []
+        removed = 0
+        for day in trip_plan.days:
+            unique = []
+            for attr in day.attractions:
+                norm = attr.name.strip()
+                # 精确去重
+                if norm in seen_names:
+                    logger.debug(f"跨天去重（精确）: 第{day.day_index + 1}天移除「{attr.name}」")
+                    removed += 1
+                    continue
+                # 相似去重（Jaccard > 0.85）
+                if any(_jaccard(norm, s) > 0.85 for s in seen_names):
+                    logger.debug(f"跨天去重（相似）: 第{day.day_index + 1}天移除「{attr.name}」")
+                    removed += 1
+                    continue
+                seen_names.append(norm)
+                unique.append(attr)
+            day.attractions = unique
+        if removed:
+            logger.info(f"景点跨天去重：移除 {removed} 个重复景点")
+
+    def _dedup_meals(self, trip_plan: TripPlan) -> None:
+        """跨天餐厅去重：同名餐厅跨天出现时保留首次（按餐型分组，同一天 breakfast/lunch/dinner 不互相比较）"""
+        seen_by_type: dict[str, list[str]] = {}  # meal_type → [restaurant_name, ...]
+        removed = 0
+        for day in trip_plan.days:
+            unique = []
+            for meal in day.meals:
+                meal_type = meal.type
+                name = meal.name.strip()
+                seen = seen_by_type.setdefault(meal_type, [])
+                if name in seen:
+                    logger.debug(
+                        f"餐厅跨天去重: 第{day.day_index + 1}天 {meal_type}「{name}」已出现，跳过"
+                    )
+                    removed += 1
+                    continue
+                seen.append(name)
+                unique.append(meal)
+            day.meals = unique
+        if removed:
+            logger.info(f"餐厅跨天去重：移除 {removed} 个重复餐厅")

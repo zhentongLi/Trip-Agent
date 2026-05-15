@@ -75,18 +75,6 @@ class Settings(BaseSettings):
     # Planner 上下文压缩（默认启用，可通过 PLANNER_COMPRESS_CONTEXT=false 关闭）
     planner_compress_context: bool = Field(default=True, alias="PLANNER_COMPRESS_CONTEXT")
 
-    # ── ElevenLabs TTS ────────────────────────────────────────────────────
-    elevenlabs_api_key: str = Field(default="", alias="ELEVENLABS_API_KEY")
-    # 默认声音 Bella（eleven_multilingual_v2，中文流畅）；可在控制台替换
-    elevenlabs_voice_id: str = Field(default="EXAVITQu4vr4xnSDxMaL", alias="ELEVENLABS_VOICE_ID")
-
-    # ── LLM 双模型路由（推理 vs 快速）─────────────────────────────────────
-    # 主模型用 LLM_MODEL_ID（已存在），快速模型用以下三个变量，全部可选：
-    llm_fast_model: str = Field(default="", alias="LLM_FAST_MODEL_ID")
-    llm_fast_api_key: str = Field(default="", alias="LLM_FAST_API_KEY")
-    llm_fast_base_url: str = Field(default="", alias="LLM_FAST_BASE_URL")
-    # 路由开关。false 时所有任务都走 LLM_MODEL_ID（向后兼容）。
-    llm_routing_enabled: bool = Field(default=True, alias="LLM_ROUTING_ENABLED")
 
     model_config = ConfigDict(
         env_file=".env",

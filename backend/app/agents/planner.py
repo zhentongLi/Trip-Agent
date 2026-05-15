@@ -43,6 +43,7 @@ from ..services.amap_rest_client import AmapRestClient
 from .compressor import compress_agent_responses
 from .nodes import NodeFactory
 from .parsers import parse_adjust_response
+from .token_budget import allocate as allocate_token_budget
 from .prompts import (
     ATTRACTION_AGENT_PROMPT,
     FOOD_AGENT_PROMPT,
@@ -113,7 +114,11 @@ class MultiAgentTripPlanner:
         )
         self._amap_client = amap_client
         self._memory_service = memory_service
-        self._llm_call_semaphore = asyncio.Semaphore(3)  # 允许3路并发：支持逐日并行规划
+        self._gather_semaphore = asyncio.Semaphore(4)  # gather 阶段：4个 Agent 并发槽
+        self._plan_semaphore = asyncio.Semaphore(4)    # plan 阶段：4个逐日规划并发槽
+
+        from ..config import get_settings as _get_settings
+        self._total_token_budget = _get_settings().total_token_budget
 
         # 创建 LangChain 工具
         search_tool, weather_tool = make_amap_tools(amap_client)
@@ -149,6 +154,9 @@ class MultiAgentTripPlanner:
             is_retryable_llm_error=_is_retryable_llm_error,
             build_planner_query=self._build_planner_query,
             create_fallback_plan=self._create_fallback_plan,
+            gather_semaphore=self._gather_semaphore,
+            plan_semaphore=self._plan_semaphore,
+            total_token_budget=self._total_token_budget,
         )
 
         # 构建 LangGraph 状态图
@@ -159,12 +167,22 @@ class MultiAgentTripPlanner:
     # LLM 调用：限流 + 指数退避重试
     # ──────────────────────────────────────────
 
-    async def _invoke_with_retry(self, coro_factory, label: str):
-        """限流 + 指数退避 + 抖动重试"""
+    async def _invoke_with_retry(
+        self,
+        coro_factory,
+        label: str,
+        semaphore: asyncio.Semaphore | None = None,
+    ):
+        """限流 + 指数退避 + 抖动重试。
+
+        semaphore 由调用方（gather/plan 阶段）传入，使两阶段互不干扰。
+        未传入时回退到 gather_semaphore 作为默认值。
+        """
+        sem = semaphore if semaphore is not None else self._gather_semaphore
         last_err: Exception | None = None
         for attempt in range(1, _MAX_LLM_RETRIES + 1):
             try:
-                async with self._llm_call_semaphore:
+                async with sem:
                     return await coro_factory()
             except Exception as e:
                 last_err = e

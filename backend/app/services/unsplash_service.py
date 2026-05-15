@@ -1,5 +1,6 @@
 """图片服务（使用 Unsplash API）"""
 
+import random
 import requests
 
 from typing import List, Optional
@@ -90,7 +91,7 @@ class UnsplashService:
                     logger.debug(f"Unsplash 410，用城市名重试: {city}")
                     resp = self.session.get(
                         f"{self.BASE_URL}/search/photos",
-                        params={"query": city, "per_page": 1, "orientation": "landscape"},
+                        params={"query": city, "per_page": 5, "orientation": "landscape"},
                         timeout=10
                     )
                 if resp.status_code != 200:
@@ -99,9 +100,23 @@ class UnsplashService:
             resp.raise_for_status()
             results = resp.json().get("results", [])
             if results:
-                url = results[0]["urls"]["regular"]
+                url = results[0]["urls"]["regular"]  # 主查询 per_page=1，取唯一结果
                 logger.debug(f"图片URL: {search_query} → {url}")
                 return url
+            # 无结果时回退到城市名搜索，随机选取避免多景点返回同一张图
+            if city and search_query != city:
+                logger.debug(f"图片搜索无结果: {search_query}，回退城市名: {city}")
+                resp2 = self.session.get(
+                    f"{self.BASE_URL}/search/photos",
+                    params={"query": city, "per_page": 5, "orientation": "landscape"},
+                    timeout=10,
+                )
+                if resp2.status_code == 200:
+                    results2 = resp2.json().get("results", [])
+                    if results2:
+                        url = random.choice(results2)["urls"]["regular"]
+                        logger.debug(f"图片URL（城市回退）: {city} → {url}")
+                        return url
             logger.debug(f"图片搜索无结果: {search_query}")
             return None
         except Exception as e:

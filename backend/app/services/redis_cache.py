@@ -88,3 +88,14 @@ class RedisCache:
 
     def size(self) -> int:
         return self._fallback.size()
+
+    def stats(self) -> dict:
+        """返回缓存统计信息。
+
+        async Redis 客户端的 keys() 需在事件循环内 await，
+        同步调用无法直接使用，改为汇报本地 fallback 统计并标注后端类型。
+        """
+        base = self._fallback.stats()
+        base["backend"] = "redis"
+        base["ttl_seconds"] = self._ttl
+        return base

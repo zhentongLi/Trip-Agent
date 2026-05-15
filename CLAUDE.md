@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cd backend
 
-# Run all tests (98 test cases)
+
 /opt/anaconda3/envs/trip-agent/bin/python -m pytest tests/ -q
 # or with conda:
 conda run -n trip-agent python -m pytest tests/ -q
@@ -69,14 +69,12 @@ app/
 │                        #   Phase-2 placeholder for Amadeus/Ctrip realtime price APIs
 ├── agents/              # LangGraph multi-agent system
 │   ├── planner.py       # MultiAgentTripPlanner — plan_trip_stream, plan_trip, adjust_trip
+│   │                    #   Two semaphores: _gather_semaphore(4) and _plan_semaphore(4)
 │   │                    #   Cache read/write uses await cache.aget/aset (async-aware)
 │   │                    #   Constructor injects MemoryService → user_profile_hint
 │   │                    #   _llm_call_semaphore = 3 (supports 3-way parallel day planning)
 │   ├── nodes.py         # NodeFactory — gather / plan / postprocess LangGraph nodes
-│   │                    #   plan() does N parallel single-day LLM calls (fallback: single-call)
-│   │                    #   _parse_weather_info() parses WeatherInfo via regex (zero LLM)
-│   ├── compressor.py    # Rule-based POI/weather text compression (60-70% token reduction)
-│   │                    #   Toggle via PLANNER_COMPRESS_CONTEXT env var
+
 │   ├── parsers.py       # extract_json_str, parse_trip_response, parse_adjust_response
 │   ├── prompts.py       # All 5 agent system prompts + _SINGLE_DAY_SYSTEM_PROMPT (in nodes.py)
 │   ├── state.py         # PlannerState TypedDict (includes user_profile_hint field)
@@ -125,21 +123,7 @@ app/
 ```
 START → gather → plan → postprocess → END
 
-gather:      NodeFactory.gather() — asyncio.gather() 4 agents in parallel
-             Attraction × N cities, Weather × N cities, Hotel, Food
 
-plan:        NodeFactory.plan() — PARALLEL by day (primary path)
-             ├─ compress_agent_responses()    → 60-70% prompt token reduction
-             ├─ asyncio.gather(_plan_single_day_async × N)  → 3-way concurrent
-             │   (each call generates ~400 tokens vs ~2000 for whole plan)
-             ├─ _parse_weather_info()         → regex extract WeatherInfo (no LLM)
-             └─ on any day failing → _plan_single_call() fallback (legacy mode)
-             Retries up to 3× on 502/503/timeout via _invoke_with_retry()
-
-postprocess: NodeFactory.postprocess()
-             _fix_coordinates()      → AmapRestClient.geocode()
-             _add_weather_warnings() → regex on weather strings
-             _enrich_opening_hours() → AmapRestClient.get_opening_hours()
              → writes result to RedisCache / TTLCache
 ```
 
@@ -238,6 +222,8 @@ app.dependency_overrides.pop(get_trip_cache, None)
 
 The `client_with_mock_planner` fixture in `conftest.py` handles this automatically.
 
+When mocking `NodeFactory` internals (e.g. `_stream_llm_with_latency`), assign an `AsyncMock` directly on the factory instance — do not mock `_invoke_with_retry`, which is only used by gather-phase agent calls.
+
 ### Skills System
 
 Pluggable capability layer built on the **strategy + registry** pattern — frontend discovers skills dynamically via `GET /api/skills`, invokes them through dedicated routes.
@@ -296,6 +282,7 @@ JWT_SECRET_KEY=<secret>
 PORT=8000
 CORS_ORIGINS=http://localhost:5173
 UNSPLASH_ACCESS_KEY=<key>
+TOTAL_TOKEN_BUDGET=16000        # total max_tokens budget per planning request
 
 # Redis (all optional — omit to use local in-memory fallback)
 REDIS_URL=redis://localhost:6379/0        # also accepted: MEMORY_REDIS_URL
